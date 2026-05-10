@@ -132,6 +132,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     try {
       for (let iter = 0; iter < MAX_AGENT_ITERATIONS; iter++) {
         let assistantText = '';
+        let thinkingNotified = false;
         const result = await this.client.chat(this.history, {
           tools: allowTools ? tools : undefined,
           model: this.model,
@@ -139,6 +140,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           onToken: (t) => {
             assistantText += t;
             this.postWebview({ type: 'token', text: t });
+          },
+          onReasoningToken: () => {
+            // Notify the webview only on the first reasoning chunk to switch
+            // the placeholder from "Typing" to "Thinking".
+            if (!thinkingNotified) {
+              thinkingNotified = true;
+              this.postWebview({ type: 'thinking' });
+            }
           },
         });
 
@@ -445,6 +454,36 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     @keyframes blink { 50% { opacity: 0; } }
 
+    /* ── Typing / thinking placeholder ──────────────────────────────── */
+    .thinking-placeholder {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--vscode-descriptionForeground);
+      font-style: italic;
+      padding: 2px 0;
+    }
+    .thinking-placeholder .label { font-size: 12px; }
+    .thinking-placeholder .dots {
+      display: inline-flex;
+      gap: 2px;
+      align-items: center;
+    }
+    .thinking-placeholder .dot {
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: 0.3;
+      animation: dotPulse 1.2s infinite ease-in-out;
+    }
+    .thinking-placeholder .dot:nth-child(2) { animation-delay: 0.15s; }
+    .thinking-placeholder .dot:nth-child(3) { animation-delay: 0.3s; }
+    @keyframes dotPulse {
+      0%, 60%, 100% { opacity: 0.3; transform: scale(0.85); }
+      30%           { opacity: 1;   transform: scale(1); }
+    }
+
     /* ── Tool cards ─────────────────────────────────────────────────────── */
     .tool-card {
       display: flex;
@@ -671,7 +710,35 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     let currentAssistantBody = null;
     let rawBuffer = '';
     let currentMode = 'agent';
+    let placeholderEl = null;
+    let firstContentToken = true;
     const toolCards = new Map();
+
+    function placeholderHtml(label) {
+      return (
+        '<span class="thinking-placeholder">' +
+          '<span class="label">' + label + '</span>' +
+          '<span class="dots">' +
+            '<span class="dot"></span><span class="dot"></span><span class="dot"></span>' +
+          '</span>' +
+        '</span>'
+      );
+    }
+
+    function showPlaceholder(label) {
+      if (!currentAssistantBody) return;
+      currentAssistantBody.classList.remove('streaming-cursor');
+      currentAssistantBody.innerHTML = placeholderHtml(label);
+      placeholderEl = currentAssistantBody.querySelector('.thinking-placeholder');
+      scrollBottom();
+    }
+
+    function clearPlaceholder() {
+      if (placeholderEl && currentAssistantBody) {
+        currentAssistantBody.innerHTML = '';
+      }
+      placeholderEl = null;
+    }
 
     const MODE_HINTS = {
       ask:   'Ask: chat only, no tools, no file access.',
@@ -767,33 +834,53 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     function startAssistantBubble(model, mode) {
       emptyState.style.display = 'none';
       rawBuffer = '';
+      placeholderEl = null;
+      firstContentToken = true;
       const label = (mode || 'agent').toUpperCase() + ' \u00b7 ' + (model || 'DeepSeek');
       const div = document.createElement('div');
       div.className = 'msg msg-assistant';
       div.innerHTML =
         '<div class="msg-role">' + escapeHtml(label) + '</div>' +
-        '<div class="msg-body streaming-cursor"></div>';
+        '<div class="msg-body"></div>';
       messagesEl.appendChild(div);
       currentAssistantBody = div.querySelector('.msg-body');
-      scrollBottom();
+      // Show an initial placeholder immediately so the bubble is never empty.
+      // Pro models start with reasoning, so show "Thinking" right away;
+      // Flash and others start producing content so show "Typing".
+      const isPro = (model || '').toLowerCase().includes('pro') ||
+                    (model || '').toLowerCase().includes('reasoner');
+      showPlaceholder(isPro ? 'Thinking' : 'Typing');
     }
 
     function appendToken(token) {
       if (!currentAssistantBody) return;
+      if (firstContentToken) {
+        clearPlaceholder();
+        firstContentToken = false;
+      }
       rawBuffer += token;
       currentAssistantBody.innerHTML = renderMarkdown(rawBuffer);
       currentAssistantBody.classList.add('streaming-cursor');
       scrollBottom();
     }
 
+    function showThinking() {
+      // Switch the placeholder to "Thinking" if no content has streamed yet.
+      if (firstContentToken && currentAssistantBody) {
+        showPlaceholder('Thinking');
+      }
+    }
+
     function finaliseAssistant() {
       if (currentAssistantBody) {
         currentAssistantBody.classList.remove('streaming-cursor');
         if (!rawBuffer.trim()) {
+          // Remove empty bubbles (only tool calls, no text).
           const bubble = currentAssistantBody.parentElement;
           bubble && bubble.remove();
         }
         currentAssistantBody = null;
+        placeholderEl = null;
       }
     }
 
@@ -894,6 +981,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
         case 'token':
           appendToken(msg.text);
+          break;
+        case 'thinking':
+          showThinking();
           break;
         case 'endResponse':
           finaliseAssistant();

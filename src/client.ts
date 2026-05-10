@@ -32,6 +32,8 @@ export interface ChatOptions {
   model?: string;
   /** Streaming token callback (assistant text only — tool args are buffered). */
   onToken?: (token: string) => void;
+  /** Called whenever a reasoning_content fragment arrives (thinking models). */
+  onReasoningToken?: (token: string) => void;
   /** Cancellation. */
   signal?: AbortSignal;
 }
@@ -154,6 +156,7 @@ export class DeepSeekClient {
                   delta.reasoning_content
                 ) {
                   reasoningContent += delta.reasoning_content;
+                  options.onReasoningToken?.(delta.reasoning_content);
                 }
 
                 if (Array.isArray(delta.tool_calls)) {
