@@ -28,6 +28,8 @@ export interface ChatResult {
 export interface ChatOptions {
   /** Tool definitions to expose to the model. */
   tools?: readonly unknown[];
+  /** Override the model for this call (defaults to the global setting). */
+  model?: string;
   /** Streaming token callback (assistant text only — tool args are buffered). */
   onToken?: (token: string) => void;
   /** Cancellation. */
@@ -78,7 +80,7 @@ export class DeepSeekClient {
     }
 
     const payload: Record<string, unknown> = {
-      model: this.model,
+      model: options.model ?? this.model,
       messages,
       max_tokens: this.maxTokens,
       temperature: this.temperature,

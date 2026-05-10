@@ -125,7 +125,61 @@ export const TOOL_DEFINITIONS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'get_diagnostics',
+      description:
+        'Read the current Problems panel of VS Code (errors, warnings, hints from linters and language servers). Use this in Debug mode to find what is broken before reading code.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: {
+            type: 'string',
+            description:
+              'Optional workspace-relative file to scope diagnostics to. Omit to get diagnostics for the whole workspace.',
+          },
+          severity: {
+            type: 'string',
+            enum: ['error', 'warning', 'info', 'hint', 'all'],
+            description:
+              'Minimum severity to include. Defaults to "warning" (errors + warnings).',
+          },
+        },
+      },
+    },
+  },
 ] as const;
+
+/** Available chat modes. Each mode exposes a different subset of tools. */
+export type ChatMode = 'ask' | 'plan' | 'debug' | 'agent';
+
+const MODE_TOOLS: Record<ChatMode, readonly string[]> = {
+  ask: [],
+  plan: ['read_file', 'list_directory', 'search_workspace', 'get_open_files'],
+  debug: [
+    'read_file',
+    'list_directory',
+    'search_workspace',
+    'get_open_files',
+    'get_diagnostics',
+  ],
+  agent: [
+    'read_file',
+    'list_directory',
+    'search_workspace',
+    'get_open_files',
+    'write_file',
+    'apply_edit',
+    'get_diagnostics',
+  ],
+};
+
+/** Returns the tool definitions allowed for a given mode. */
+export function toolsForMode(mode: ChatMode): readonly unknown[] {
+  const allowed = new Set(MODE_TOOLS[mode]);
+  return TOOL_DEFINITIONS.filter((t) => allowed.has(t.function.name));
+}
 
 const MAX_FILE_BYTES = 100_000;
 const MAX_SEARCH_RESULTS = 50;
@@ -178,6 +232,11 @@ export async function executeTool(
           String(args.path ?? ''),
           String(args.old_text ?? ''),
           String(args.new_text ?? '')
+        );
+      case 'get_diagnostics':
+        return getDiagnostics(
+          args.path ? String(args.path) : undefined,
+          args.severity ? String(args.severity) : 'warning'
         );
       default:
         return `Error: unknown tool "${name}"`;
@@ -270,6 +329,60 @@ async function searchWorkspace(
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function getDiagnostics(rel: string | undefined, severityName: string): string {
+  const minSeverity = severityFromName(severityName);
+
+  const targets: [vscode.Uri, vscode.Diagnostic[]][] = rel
+    ? [[resolveWorkspacePath(rel), vscode.languages.getDiagnostics(resolveWorkspacePath(rel))]]
+    : vscode.languages.getDiagnostics();
+
+  const lines: string[] = [];
+  let total = 0;
+
+  for (const [uri, diags] of targets) {
+    const filtered = diags.filter((d) => d.severity <= minSeverity);
+    if (filtered.length === 0) continue;
+
+    const path = vscode.workspace.asRelativePath(uri);
+    lines.push(`\n${path}`);
+    for (const d of filtered) {
+      total++;
+      const sev = severityLabel(d.severity);
+      const line = d.range.start.line + 1;
+      const col = d.range.start.character + 1;
+      const source = d.source ? ` [${d.source}]` : '';
+      lines.push(`  ${sev} ${line}:${col}${source}  ${d.message.replace(/\n/g, ' ')}`);
+      if (lines.length > 200) break;
+    }
+    if (lines.length > 200) break;
+  }
+
+  if (total === 0) return rel ? `No diagnostics in "${rel}".` : 'No diagnostics in the workspace.';
+  return `${total} diagnostic(s):${lines.join('\n')}`;
+}
+
+function severityFromName(name: string): vscode.DiagnosticSeverity {
+  switch (name.toLowerCase()) {
+    case 'error': return vscode.DiagnosticSeverity.Error;
+    case 'warning': return vscode.DiagnosticSeverity.Warning;
+    case 'info': return vscode.DiagnosticSeverity.Information;
+    case 'hint':
+    case 'all':
+      return vscode.DiagnosticSeverity.Hint;
+    default: return vscode.DiagnosticSeverity.Warning;
+  }
+}
+
+function severityLabel(s: vscode.DiagnosticSeverity): string {
+  switch (s) {
+    case vscode.DiagnosticSeverity.Error: return 'ERROR  ';
+    case vscode.DiagnosticSeverity.Warning: return 'WARN   ';
+    case vscode.DiagnosticSeverity.Information: return 'INFO   ';
+    case vscode.DiagnosticSeverity.Hint: return 'HINT   ';
+    default: return '       ';
+  }
 }
 
 function getOpenFiles(): string {

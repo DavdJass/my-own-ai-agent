@@ -5,7 +5,7 @@ import { InlineProvider } from './inlineProvider';
 
 export function activate(context: vscode.ExtensionContext): void {
   const client = new DeepSeekClient(context);
-  const chatProvider = new ChatViewProvider(client);
+  const chatProvider = new ChatViewProvider(client, context);
 
   // ── Sidebar webview view ───────────────────────────────────────────────
   context.subscriptions.push(
