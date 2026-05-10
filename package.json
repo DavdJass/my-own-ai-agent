@@ -1,0 +1,110 @@
+{
+  "name": "deepseek-coder",
+  "displayName": "DeepSeek Coder",
+  "description": "Private AI coding assistant powered by DeepSeek — chat, inline completions, explain & refactor.",
+  "version": "0.2.1",
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["Machine Learning", "Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "deepseek.openChat",
+        "title": "DeepSeek: Open Chat",
+        "icon": "$(hubot)"
+      },
+      {
+        "command": "deepseek.explainCode",
+        "title": "DeepSeek: Explain Code"
+      },
+      {
+        "command": "deepseek.refactorCode",
+        "title": "DeepSeek: Refactor Code"
+      },
+      {
+        "command": "deepseek.generateCode",
+        "title": "DeepSeek: Generate Code"
+      },
+      {
+        "command": "deepseek.setApiKey",
+        "title": "DeepSeek: Set API Key"
+      },
+      {
+        "command": "deepseek.selectModel",
+        "title": "DeepSeek: Select Model"
+      }
+    ],
+    "configuration": {
+      "title": "DeepSeek Coder",
+      "properties": {
+        "deepseek.model": {
+          "type": "string",
+          "default": "deepseek-v4-flash",
+          "enum": ["deepseek-v4-flash", "deepseek-v4-pro"],
+          "enumDescriptions": [
+            "Faster and cheaper — good for everyday tasks",
+            "More powerful — best for complex problems"
+          ],
+          "description": "DeepSeek model used for chat and code actions."
+        },
+        "deepseek.inlineEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable inline code completions while typing."
+        },
+        "deepseek.maxTokens": {
+          "type": "number",
+          "default": 2048,
+          "minimum": 256,
+          "maximum": 8192,
+          "description": "Maximum tokens for chat responses."
+        },
+        "deepseek.temperature": {
+          "type": "number",
+          "default": 0.2,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Sampling temperature (lower = more deterministic code)."
+        }
+      }
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "deepseek.explainCode",
+          "when": "editorHasSelection",
+          "group": "deepseek@1"
+        },
+        {
+          "command": "deepseek.refactorCode",
+          "when": "editorHasSelection",
+          "group": "deepseek@2"
+        },
+        {
+          "command": "deepseek.generateCode",
+          "group": "deepseek@3"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "deepseek.openChat",
+        "key": "ctrl+shift+d",
+        "mac": "cmd+shift+d",
+        "when": "editorTextFocus"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.4.0",
+    "@vscode/vsce": "^3.0.0"
+  }
+}
