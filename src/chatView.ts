@@ -5,48 +5,54 @@ import { TOOL_DEFINITIONS, executeTool } from './tools';
 
 const MAX_AGENT_ITERATIONS = 8;
 
-export class ChatPanel {
-  private static instance: ChatPanel | undefined;
+/**
+ * Sidebar webview view that hosts the DeepSeek chat.
+ * Lives in its own activity-bar container so the user always has 1-click access.
+ */
+export class ChatViewProvider implements vscode.WebviewViewProvider {
+  static readonly viewType = 'deepseek.chatView';
 
-  private readonly panel: vscode.WebviewPanel;
+  private view?: vscode.WebviewView;
   private readonly client: DeepSeekClient;
   private history: Message[] = [];
   private abortController?: AbortController;
+  /** Messages queued before the webview is ready. */
+  private pendingUserMessages: string[] = [];
 
-  private constructor(panel: vscode.WebviewPanel, client: DeepSeekClient) {
-    this.panel = panel;
+  constructor(client: DeepSeekClient) {
     this.client = client;
-
-    this.panel.webview.html = this.buildHtml(this.panel.webview);
-    this.panel.onDidDispose(() => (ChatPanel.instance = undefined));
-    this.panel.webview.onDidReceiveMessage(this.onMessage.bind(this));
   }
 
-  static show(client: DeepSeekClient, context: vscode.ExtensionContext): ChatPanel {
-    if (ChatPanel.instance) {
-      ChatPanel.instance.panel.reveal(vscode.ViewColumn.Two);
-      return ChatPanel.instance;
+  resolveWebviewView(view: vscode.WebviewView): void {
+    this.view = view;
+    view.webview.options = { enableScripts: true };
+    view.webview.html = this.buildHtml();
+    view.webview.onDidReceiveMessage(this.onMessage.bind(this));
+
+    // Flush any messages requested before the view existed.
+    while (this.pendingUserMessages.length > 0) {
+      const text = this.pendingUserMessages.shift()!;
+      this.processChat(text);
     }
-
-    const panel = vscode.window.createWebviewPanel(
-      'deepseekChat',
-      'DeepSeek Chat',
-      vscode.ViewColumn.Two,
-      {
-        enableScripts: true,
-        retainContextWhenHidden: true,
-        localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'out')],
-      }
-    );
-
-    ChatPanel.instance = new ChatPanel(panel, client);
-    return ChatPanel.instance;
   }
 
-  /** Pre-fill the input with text and send it (used by Explain / Refactor / Generate). */
-  sendUserMessage(text: string): void {
-    this.panel.webview.postMessage({ type: 'prefill', text });
+  /** Reveal the sidebar (opens it if collapsed) and feed it a message. */
+  async sendUserMessage(text: string): Promise<void> {
+    await vscode.commands.executeCommand(`${ChatViewProvider.viewType}.focus`);
+    if (!this.view) {
+      this.pendingUserMessages.push(text);
+      return;
+    }
+    this.view.show?.(true);
+    this.postWebview({ type: 'prefill', text });
     this.processChat(text);
+  }
+
+  /** Reset the conversation and clear the visible messages. */
+  clear(): void {
+    this.history = [];
+    this.abortController?.abort();
+    this.postWebview({ type: 'clearAll' });
   }
 
   // ─── Agent loop ────────────────────────────────────────────────────────────
@@ -72,9 +78,7 @@ export class ChatPanel {
           },
         });
 
-        // Persist the assistant turn (with any tool calls).
-        // reasoning_content is required by DeepSeek thinking models — must be
-        // sent back verbatim on the next turn or the API returns 400.
+        // reasoning_content is required by DeepSeek thinking models.
         this.history.push({
           role: 'assistant',
           content: result.content,
@@ -89,16 +93,10 @@ export class ChatPanel {
               : undefined,
         });
 
-        if (result.toolCalls.length === 0) {
-          // No tools requested — final answer.
-          break;
-        }
+        if (result.toolCalls.length === 0) break;
 
-        // Insert a marker into the assistant bubble so it visually closes
-        // before tool cards appear.
         if (assistantText) this.postWebview({ type: 'endResponse' });
 
-        // Execute each tool sequentially and feed results back.
         for (const call of result.toolCalls) {
           await this.runTool(call);
         }
@@ -109,7 +107,6 @@ export class ChatPanel {
             text: `Agent stopped: reached max iterations (${MAX_AGENT_ITERATIONS}).`,
           });
         } else {
-          // Open a new assistant bubble for the next streamed response.
           this.postWebview({ type: 'startResponse', model: this.client.model });
         }
       }
@@ -133,7 +130,8 @@ export class ChatPanel {
     });
 
     const output = await executeTool(call.name, args);
-    const isError = output.startsWith('Error:') || output.startsWith('User rejected');
+    const isError =
+      output.startsWith('Error:') || output.startsWith('User rejected');
 
     this.postWebview({
       type: 'toolEnd',
@@ -164,17 +162,12 @@ export class ChatPanel {
   ): string {
     switch (name) {
       case 'read_file':
-        return String(args.path ?? '');
       case 'list_directory':
-        return String(args.path ?? '.');
-      case 'search_workspace':
-        return `"${args.query}"${args.glob ? ` in ${args.glob}` : ''}`;
-      case 'get_open_files':
-        return '';
       case 'write_file':
-        return String(args.path ?? '');
       case 'apply_edit':
         return String(args.path ?? '');
+      case 'search_workspace':
+        return `"${args.query}"${args.glob ? ` in ${args.glob}` : ''}`;
       default:
         return '';
     }
@@ -186,7 +179,8 @@ export class ChatPanel {
   }
 
   private buildSystemPrompt(): string {
-    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '(no workspace)';
+    const root =
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '(no workspace)';
     const parts = [
       'You are DeepSeek Coder, an autonomous coding agent embedded in VS Code.',
       'You can read files, search the workspace, and propose edits using the available tools.',
@@ -207,7 +201,7 @@ export class ChatPanel {
   }
 
   private postWebview(msg: Record<string, unknown>): void {
-    this.panel.webview.postMessage(msg);
+    this.view?.webview.postMessage(msg);
   }
 
   private onMessage(msg: { type: string; text?: string }): void {
@@ -226,8 +220,7 @@ export class ChatPanel {
 
   // ─── HTML / CSS / JS — fully inlined ───────────────────────────────────────
 
-  private buildHtml(webview: vscode.Webview): string {
-    void webview;
+  private buildHtml(): string {
     const nonce = crypto.randomBytes(16).toString('base64');
     const csp = [
       `default-src 'none'`,
@@ -245,31 +238,36 @@ export class ChatPanel {
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    html, body {
+      height: 100%;
+      width: 100%;
+    }
+
     body {
-      font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
-      font-size: var(--vscode-font-size, 13px);
-      background: var(--vscode-panel-background, #1e1e1e);
-      color: var(--vscode-foreground, #cccccc);
+      font-family: var(--vscode-font-family);
+      font-size: var(--vscode-font-size);
+      background: var(--vscode-sideBar-background);
+      color: var(--vscode-sideBar-foreground, var(--vscode-foreground));
       display: flex;
       flex-direction: column;
-      height: 100vh;
       overflow: hidden;
     }
 
+    /* ── Top bar ─────────────────────────────────────────────────────── */
     #topbar {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 6px 12px;
-      border-bottom: 1px solid var(--vscode-panel-border, #333);
+      padding: 6px 10px;
+      border-bottom: 1px solid var(--vscode-panel-border);
       flex-shrink: 0;
     }
     #model-label {
       font-size: 11px;
-      opacity: 0.6;
       font-weight: 600;
       letter-spacing: 0.05em;
       text-transform: uppercase;
+      color: var(--vscode-descriptionForeground);
     }
     #btn-clear {
       background: none;
@@ -277,16 +275,16 @@ export class ChatPanel {
       color: var(--vscode-foreground);
       cursor: pointer;
       font-size: 11px;
-      opacity: 0.5;
-      padding: 2px 6px;
+      padding: 3px 8px;
       border-radius: 3px;
     }
-    #btn-clear:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground, #2a2d2e); }
+    #btn-clear:hover { background: var(--vscode-toolbar-hoverBackground); }
 
+    /* ── Messages ────────────────────────────────────────────────────── */
     #messages {
       flex: 1;
       overflow-y: auto;
-      padding: 12px;
+      padding: 10px;
       display: flex;
       flex-direction: column;
       gap: 12px;
@@ -298,30 +296,37 @@ export class ChatPanel {
       font-weight: 700;
       letter-spacing: 0.08em;
       text-transform: uppercase;
-      opacity: 0.5;
+      color: var(--vscode-descriptionForeground);
     }
-    .msg-user .msg-role { color: var(--vscode-textLink-foreground, #3794ff); }
-    .msg-assistant .msg-role { color: var(--vscode-gitDecoration-addedResourceForeground, #73c991); }
+    .msg-user .msg-role { color: var(--vscode-textLink-foreground); }
+    .msg-assistant .msg-role { color: var(--vscode-charts-green); }
 
-    .msg-body { line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+    .msg-body {
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: var(--vscode-foreground);
+    }
     .msg-user .msg-body {
-      background: var(--vscode-input-background, #3c3c3c);
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
       border-radius: 6px;
       padding: 8px 10px;
     }
     .msg-assistant .msg-body { padding: 0; }
 
     .msg-body pre {
-      background: var(--vscode-textCodeBlock-background, #0a0a0a);
-      border: 1px solid var(--vscode-panel-border, #333);
+      background: var(--vscode-textCodeBlock-background);
+      border: 1px solid var(--vscode-panel-border);
       border-radius: 5px;
       overflow-x: auto;
       padding: 10px 12px;
       margin: 6px 0;
     }
     .msg-body code {
-      font-family: var(--vscode-editor-font-family, 'Cascadia Code', monospace);
-      font-size: var(--vscode-editor-font-size, 12px);
+      font-family: var(--vscode-editor-font-family);
+      font-size: var(--vscode-editor-font-size);
+      color: var(--vscode-textPreformat-foreground);
     }
     .msg-body p { margin: 4px 0; }
     .msg-body strong { font-weight: 700; }
@@ -330,6 +335,7 @@ export class ChatPanel {
     .streaming-cursor::after {
       content: '\u258D';
       animation: blink 0.7s step-end infinite;
+      margin-left: 1px;
     }
     @keyframes blink { 50% { opacity: 0; } }
 
@@ -339,14 +345,14 @@ export class ChatPanel {
       align-items: center;
       gap: 8px;
       padding: 6px 10px;
-      background: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.1));
-      border-left: 3px solid var(--vscode-charts-blue, #3794ff);
+      background: var(--vscode-textBlockQuote-background);
+      border-left: 3px solid var(--vscode-charts-blue);
       border-radius: 4px;
       font-size: 12px;
-      font-family: var(--vscode-editor-font-family, monospace);
+      color: var(--vscode-foreground);
     }
-    .tool-card.ok { border-left-color: var(--vscode-charts-green, #73c991); }
-    .tool-card.err { border-left-color: var(--vscode-charts-red, #f48771); }
+    .tool-card.ok { border-left-color: var(--vscode-charts-green); }
+    .tool-card.err { border-left-color: var(--vscode-charts-red); }
     .tool-icon {
       width: 14px;
       height: 14px;
@@ -356,9 +362,20 @@ export class ChatPanel {
       justify-content: center;
       font-size: 12px;
     }
-    .tool-name { font-weight: 600; opacity: 0.85; }
-    .tool-summary { opacity: 0.7; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .tool-status { font-size: 10px; opacity: 0.5; flex-shrink: 0; }
+    .tool-name { font-weight: 600; }
+    .tool-summary {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: var(--vscode-editor-font-family);
+      color: var(--vscode-descriptionForeground);
+    }
+    .tool-status {
+      font-size: 10px;
+      color: var(--vscode-descriptionForeground);
+      flex-shrink: 0;
+    }
 
     .spinner {
       width: 10px;
@@ -367,6 +384,7 @@ export class ChatPanel {
       border-top-color: transparent;
       border-radius: 50%;
       animation: spin 0.8s linear infinite;
+      display: inline-block;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -375,93 +393,115 @@ export class ChatPanel {
       display: flex;
       flex-direction: column;
       gap: 6px;
-      padding: 10px 12px;
-      border-top: 1px solid var(--vscode-panel-border, #333);
+      padding: 8px 10px;
+      border-top: 1px solid var(--vscode-panel-border);
       flex-shrink: 0;
     }
     #input {
       width: 100%;
-      min-height: 72px;
+      min-height: 60px;
       max-height: 200px;
       resize: vertical;
-      background: var(--vscode-input-background, #3c3c3c);
-      color: var(--vscode-input-foreground, #cccccc);
-      border: 1px solid var(--vscode-input-border, #555);
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      border: 1px solid var(--vscode-input-border, transparent);
       border-radius: 5px;
-      padding: 8px 10px;
+      padding: 7px 9px;
       font-family: inherit;
       font-size: inherit;
       outline: none;
       line-height: 1.5;
     }
-    #input:focus { border-color: var(--vscode-focusBorder, #007fd4); }
+    #input::placeholder { color: var(--vscode-input-placeholderForeground); }
+    #input:focus { border-color: var(--vscode-focusBorder); }
 
     #btn-row {
       display: flex;
-      gap: 8px;
+      gap: 6px;
       justify-content: flex-end;
       align-items: center;
     }
-    .hint { font-size: 11px; opacity: 0.4; flex: 1; }
+    .hint {
+      font-size: 11px;
+      color: var(--vscode-descriptionForeground);
+      flex: 1;
+    }
     button.primary {
-      background: var(--vscode-button-background, #0e639c);
-      color: var(--vscode-button-foreground, #fff);
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
       border: none;
       border-radius: 4px;
-      padding: 5px 14px;
+      padding: 5px 12px;
       cursor: pointer;
       font-size: 12px;
       font-weight: 600;
     }
-    button.primary:hover { filter: brightness(1.1); }
-    button.primary:disabled { opacity: 0.4; cursor: default; }
+    button.primary:hover { background: var(--vscode-button-hoverBackground); }
+    button.primary:disabled { opacity: 0.5; cursor: default; }
     button.secondary {
-      background: none;
-      color: var(--vscode-foreground);
-      border: 1px solid var(--vscode-panel-border, #555);
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+      border: none;
       border-radius: 4px;
       padding: 5px 10px;
       cursor: pointer;
       font-size: 12px;
     }
-    button.secondary:hover { background: var(--vscode-toolbar-hoverBackground, #2a2d2e); }
+    button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
 
+    /* ── Error toast ─────────────────────────────────────────────────── */
     #error-toast {
       display: none;
-      background: var(--vscode-inputValidation-errorBackground, #5a1d1d);
-      color: var(--vscode-inputValidation-errorForeground, #f48771);
-      border: 1px solid var(--vscode-inputValidation-errorBorder, #be1100);
+      background: var(--vscode-inputValidation-errorBackground);
+      color: var(--vscode-inputValidation-errorForeground);
+      border: 1px solid var(--vscode-inputValidation-errorBorder);
       border-radius: 4px;
       padding: 6px 10px;
       font-size: 12px;
-      margin: 0 12px 8px;
+      margin: 0 10px 6px;
     }
 
+    /* ── Empty state ─────────────────────────────────────────────────── */
     #empty-state {
       text-align: center;
-      opacity: 0.4;
-      padding: 40px 20px;
+      padding: 30px 16px;
       user-select: none;
+      color: var(--vscode-foreground);
     }
-    #empty-state .logo { font-size: 36px; margin-bottom: 8px; }
-    #empty-state p { font-size: 13px; }
+    #empty-state .logo { font-size: 32px; margin-bottom: 10px; }
+    #empty-state .title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--vscode-foreground);
+      margin-bottom: 4px;
+    }
+    #empty-state .subtitle {
+      font-size: 12px;
+      color: var(--vscode-descriptionForeground);
+      line-height: 1.5;
+    }
     #empty-state .examples {
-      margin-top: 20px;
+      margin-top: 18px;
       display: flex;
       flex-direction: column;
       gap: 6px;
-      align-items: stretch;
     }
     #empty-state .example {
-      background: var(--vscode-input-background, #3c3c3c);
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      border: 1px solid var(--vscode-input-border, transparent);
       border-radius: 4px;
-      padding: 8px 10px;
+      padding: 7px 9px;
       font-size: 12px;
+      font-family: inherit;
       cursor: pointer;
       text-align: left;
-      opacity: 0.8;
+      line-height: 1.4;
     }
-    #empty-state .example:hover { opacity: 1; }
+    #empty-state .example:hover {
+      background: var(--vscode-list-hoverBackground);
+      border-color: var(--vscode-focusBorder);
+    }
   </style>
 </head>
 <body>
@@ -473,12 +513,12 @@ export class ChatPanel {
   <div id="messages">
     <div id="empty-state">
       <div class="logo">\u26A1</div>
-      <p>DeepSeek Coder Agent</p>
-      <p style="margin-top:4px;font-size:11px">I can read your files, search the workspace, and edit code.</p>
+      <div class="title">DeepSeek Coder Agent</div>
+      <div class="subtitle">I can read your files, search the workspace, and edit code.</div>
       <div class="examples">
-        <button class="example" data-q="What does this project do? Read the README and explain.">"What does this project do?"</button>
-        <button class="example" data-q="Find all TODO comments in the codebase.">"Find all TODO comments"</button>
-        <button class="example" data-q="Add a docstring to the main function in the active file.">"Add a docstring to my main function"</button>
+        <button class="example" data-q="What does this project do? Read the README and explain.">What does this project do?</button>
+        <button class="example" data-q="Find all TODO comments in the codebase.">Find all TODO comments</button>
+        <button class="example" data-q="Add a docstring to the main function in the active file.">Document my main function</button>
       </div>
     </div>
   </div>
@@ -486,9 +526,9 @@ export class ChatPanel {
   <div id="error-toast"></div>
 
   <div id="inputarea">
-    <textarea id="input" placeholder="Ask anything\u2026 the agent will read files as needed. (Enter to send, Shift+Enter = new line)"></textarea>
+    <textarea id="input" placeholder="Ask anything\u2026 the agent will read files as needed."></textarea>
     <div id="btn-row">
-      <span class="hint">Shift+Enter = new line</span>
+      <span class="hint">Enter to send</span>
       <button class="secondary" id="btn-stop" style="display:none">Stop</button>
       <button class="primary" id="btn-send">Send</button>
     </div>
@@ -510,16 +550,15 @@ export class ChatPanel {
     let rawBuffer = '';
     const toolCards = new Map();
 
-    // ── Minimal Markdown renderer ─────────────────────────────────────────
     function renderMarkdown(text) {
       let out = text
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;');
 
-      out = out.replace(/\`\`\`([\\w+-]*)\\n([\\s\\S]*?)\`\`\`/g, (_, lang, code) => {
-        return '<pre><code class="lang-' + lang + '">' + code + '</code></pre>';
-      });
+      out = out.replace(/\`\`\`([\\w+-]*)\\n([\\s\\S]*?)\`\`\`/g, (_, lang, code) =>
+        '<pre><code class="lang-' + lang + '">' + code + '</code></pre>'
+      );
       out = out.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
       out = out.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
       out = out.replace(/\\*(.+?)\\*/g, '<em>$1</em>');
@@ -589,7 +628,6 @@ export class ChatPanel {
     function finaliseAssistant() {
       if (currentAssistantBody) {
         currentAssistantBody.classList.remove('streaming-cursor');
-        // Remove empty assistant bubbles (only tool calls, no text).
         if (!rawBuffer.trim()) {
           const bubble = currentAssistantBody.parentElement;
           bubble && bubble.remove();
@@ -598,7 +636,6 @@ export class ChatPanel {
       }
     }
 
-    // ── Tool cards ────────────────────────────────────────────────────────
     function toolIcon(name) {
       switch (name) {
         case 'read_file':       return '\u{1F4C4}';
@@ -649,7 +686,6 @@ export class ChatPanel {
       toolCards.delete(id);
     }
 
-    // ── Send ──────────────────────────────────────────────────────────────
     function send(text) {
       const msg = (text ?? inputEl.value).trim();
       if (!msg || streaming) return;
@@ -674,13 +710,11 @@ export class ChatPanel {
       }
     });
 
-    // Example buttons in empty state
     document.querySelectorAll('#empty-state .example').forEach((btn) => {
       btn.addEventListener('click', () => send(btn.dataset.q));
     });
 
-    // ── Messages from extension ───────────────────────────────────────────
-    window.addEventListener('message', (event) => {
+      window.addEventListener('message', (event) => {
       const msg = event.data;
       switch (msg.type) {
         case 'prefill':
@@ -703,6 +737,14 @@ export class ChatPanel {
           break;
         case 'toolEnd':
           endTool(msg.id, msg.ok, msg.preview);
+          break;
+        case 'clearAll':
+          messagesEl.innerHTML = '';
+          messagesEl.appendChild(emptyState);
+          emptyState.style.display = '';
+          toolCards.clear();
+          finaliseAssistant();
+          setStreaming(false);
           break;
         case 'error':
           finaliseAssistant();

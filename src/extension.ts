@@ -1,10 +1,20 @@
 import * as vscode from 'vscode';
 import { DeepSeekClient } from './client';
-import { ChatPanel } from './chatPanel';
+import { ChatViewProvider } from './chatView';
 import { InlineProvider } from './inlineProvider';
 
 export function activate(context: vscode.ExtensionContext): void {
   const client = new DeepSeekClient(context);
+  const chatProvider = new ChatViewProvider(client);
+
+  // ── Sidebar webview view ───────────────────────────────────────────────
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      ChatViewProvider.viewType,
+      chatProvider,
+      { webviewOptions: { retainContextWhenHidden: true } }
+    )
+  );
 
   // ── Status bar — shows active model, click to switch ──────────────────
   const statusBar = vscode.window.createStatusBarItem(
@@ -19,7 +29,7 @@ export function activate(context: vscode.ExtensionContext): void {
       .getConfiguration('deepseek')
       .get<string>('model', 'deepseek-v4-flash');
     const label = model === 'deepseek-v4-pro' ? 'DS Pro' : 'DS Flash';
-    statusBar.text = `$(hubot) ${label}`;
+    statusBar.text = `$(comment-discussion) ${label}`;
     statusBar.tooltip = `DeepSeek model: ${model}\nClick to switch`;
     statusBar.show();
   };
@@ -33,10 +43,18 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // ── Commands ───────────────────────────────────────────────────────────
 
-  // Open / focus chat panel
+  // Open / focus the sidebar chat view
   context.subscriptions.push(
-    vscode.commands.registerCommand('deepseek.openChat', () => {
-      ChatPanel.show(client, context);
+    vscode.commands.registerCommand('deepseek.openChat', async () => {
+      await vscode.commands.executeCommand(
+        `${ChatViewProvider.viewType}.focus`
+      );
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('deepseek.clearChat', () => {
+      chatProvider.clear();
     })
   );
 
@@ -70,13 +88,13 @@ export function activate(context: vscode.ExtensionContext): void {
       const items: vscode.QuickPickItem[] = [
         {
           label: 'deepseek-v4-flash',
-          description: 'Faster · cheaper',
-          detail: current === 'deepseek-v4-flash' ? '✓ active' : '',
+          description: 'Faster, cheaper',
+          detail: current === 'deepseek-v4-flash' ? 'Currently active' : '',
         },
         {
           label: 'deepseek-v4-pro',
-          description: 'More powerful',
-          detail: current === 'deepseek-v4-pro' ? '✓ active' : '',
+          description: 'More powerful (thinking mode)',
+          detail: current === 'deepseek-v4-pro' ? 'Currently active' : '',
         },
       ];
 
@@ -110,8 +128,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
 
       const lang = editor.document.languageId;
-      const panel = ChatPanel.show(client, context);
-      panel.sendUserMessage(
+      chatProvider.sendUserMessage(
         `Explain what this ${lang} code does:\n\`\`\`${lang}\n${code}\n\`\`\``
       );
     })
@@ -137,8 +154,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!instruction) return;
 
       const lang = editor.document.languageId;
-      const panel = ChatPanel.show(client, context);
-      panel.sendUserMessage(
+      chatProvider.sendUserMessage(
         `Refactor this ${lang} code — ${instruction}:\n\`\`\`${lang}\n${code}\n\`\`\``
       );
     })
@@ -148,16 +164,14 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('deepseek.generateCode', async () => {
       const description = await vscode.window.showInputBox({
         prompt: 'Describe the code you want to generate',
-        placeHolder:
-          'e.g. a function that sorts a list of users by name…',
+        placeHolder: 'e.g. a function that sorts a list of users by name…',
         ignoreFocusOut: true,
       });
       if (!description) return;
 
       const lang =
         vscode.window.activeTextEditor?.document.languageId ?? 'code';
-      const panel = ChatPanel.show(client, context);
-      panel.sendUserMessage(`Generate ${lang} code: ${description}`);
+      chatProvider.sendUserMessage(`Generate ${lang} code: ${description}`);
     })
   );
 

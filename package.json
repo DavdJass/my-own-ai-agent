@@ -1,18 +1,38 @@
 {
   "name": "deepseek-coder",
   "displayName": "DeepSeek Coder",
-  "description": "Private AI coding assistant powered by DeepSeek — chat, inline completions, explain & refactor.",
-  "version": "0.2.1",
+  "description": "Private AI coding agent powered by DeepSeek — chat with file tools, inline completions, explain & refactor.",
+  "version": "0.3.0",
   "engines": { "vscode": "^1.90.0" },
   "categories": ["Machine Learning", "Other"],
   "activationEvents": ["onStartupFinished"],
   "main": "./out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "deepseek-sidebar",
+          "title": "DeepSeek Coder",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "deepseek-sidebar": [
+        {
+          "type": "webview",
+          "id": "deepseek.chatView",
+          "name": "Chat",
+          "icon": "media/icon.svg",
+          "contextualTitle": "DeepSeek"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "deepseek.openChat",
         "title": "DeepSeek: Open Chat",
-        "icon": "$(hubot)"
+        "icon": "$(comment-discussion)"
       },
       {
         "command": "deepseek.explainCode",
@@ -32,7 +52,13 @@
       },
       {
         "command": "deepseek.selectModel",
-        "title": "DeepSeek: Select Model"
+        "title": "DeepSeek: Select Model",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "deepseek.clearChat",
+        "title": "DeepSeek: Clear Chat",
+        "icon": "$(clear-all)"
       }
     ],
     "configuration": {
@@ -43,8 +69,8 @@
           "default": "deepseek-v4-flash",
           "enum": ["deepseek-v4-flash", "deepseek-v4-pro"],
           "enumDescriptions": [
-            "Faster and cheaper — good for everyday tasks",
-            "More powerful — best for complex problems"
+            "Faster and cheaper — recommended for everyday tasks",
+            "More powerful (thinking mode) — best for complex problems"
           ],
           "description": "DeepSeek model used for chat and code actions."
         },
@@ -85,14 +111,25 @@
           "command": "deepseek.generateCode",
           "group": "deepseek@3"
         }
+      ],
+      "view/title": [
+        {
+          "command": "deepseek.clearChat",
+          "when": "view == deepseek.chatView",
+          "group": "navigation"
+        },
+        {
+          "command": "deepseek.selectModel",
+          "when": "view == deepseek.chatView",
+          "group": "navigation"
+        }
       ]
     },
     "keybindings": [
       {
         "command": "deepseek.openChat",
         "key": "ctrl+shift+d",
-        "mac": "cmd+shift+d",
-        "when": "editorTextFocus"
+        "mac": "cmd+shift+d"
       }
     ]
   },
