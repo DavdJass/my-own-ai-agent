@@ -21,7 +21,7 @@ npm run compile
 npx vsce package --allow-missing-repository
 ```
 
-In VS Code: **Extensions** → `...` → **Install from VSIX...** → select `deepseek-coder-0.3.0.vsix`.
+In VS Code: **Extensions** → `...` → **Install from VSIX...** → select `deepseek-coder-0.4.0.vsix`.
 
 ## Setting your API key
 
