@@ -117,11 +117,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   // ─── Agent loop ────────────────────────────────────────────────────────────
 
   private async processChat(userText: string): Promise<void> {
+    // Resolve @mentions before sending to the model.
+    const resolvedText = await this.resolveAtMentions(userText);
+
     // Re-seed the system prompt every turn so mode switches mid-conversation
     // take effect (we keep only the latest system message).
     this.history = this.history.filter((m) => m.role !== 'system');
     this.history.unshift({ role: 'system', content: this.buildSystemPrompt() });
-    this.history.push({ role: 'user', content: userText });
+    this.history.push({ role: 'user', content: resolvedText });
 
     this.abortController = new AbortController();
     this.postWebview({ type: 'startResponse', model: this.model, mode: this.mode });
@@ -244,6 +247,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         return args.path
           ? `${args.path} (${args.severity ?? 'warning'}+)`
           : `workspace (${args.severity ?? 'warning'}+)`;
+      case 'get_git_status':
+        return args.include_diff ? 'with diff' : 'status + log';
+      case 'run_command':
+        return String(args.command ?? '');
       default:
         return '';
     }
@@ -252,6 +259,35 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private previewOutput(output: string): string {
     const firstLine = output.split('\n')[0] ?? '';
     return firstLine.length > 120 ? firstLine.slice(0, 117) + '...' : firstLine;
+  }
+
+  private async resolveAtMentions(text: string): Promise<string> {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!root) return text;
+
+    const matches = [...text.matchAll(/@([\w./\\-]+)/g)];
+    if (matches.length === 0) return text;
+
+    const attachments: string[] = [];
+    for (const match of matches) {
+      const rel = match[1];
+      try {
+        const uri = vscode.Uri.joinPath(root, rel);
+        const data = await vscode.workspace.fs.readFile(uri);
+        const content = Buffer.from(data).toString('utf-8');
+        const ext = rel.split('.').pop() ?? '';
+        const truncated =
+          content.length > 8000
+            ? content.slice(0, 8000) + '\n// ... (truncated)'
+            : content;
+        attachments.push(`File \`${rel}\`:\n\`\`\`${ext}\n${truncated}\n\`\`\``);
+      } catch {
+        /* not a file — leave the @mention as-is */
+      }
+    }
+
+    if (attachments.length === 0) return text;
+    return text + '\n\n---\n*Attached via @mention:*\n' + attachments.join('\n\n');
   }
 
   private buildSystemPrompt(): string {
@@ -275,6 +311,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async onMessage(msg: {
     type: string;
     text?: string;
+    code?: string;
     mode?: string;
     model?: string;
   }): Promise<void> {
@@ -288,6 +325,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case 'clear':
         this.history = [];
         break;
+      case 'insertCode': {
+        const editor = vscode.window.activeTextEditor;
+        if (editor && msg.code) {
+          await editor.edit((edit) =>
+            edit.insert(editor.selection.active, String(msg.code))
+          );
+          await vscode.window.showTextDocument(editor.document, { preview: false });
+        }
+        break;
+      }
       case 'setMode':
         if (msg.mode && (AVAILABLE_MODES as readonly string[]).includes(msg.mode)) {
           this.mode = msg.mode as ChatMode;
@@ -446,6 +493,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     .msg-body p { margin: 4px 0; }
     .msg-body strong { font-weight: 700; }
     .msg-body em { font-style: italic; }
+
+    /* ── Code block "Insert at cursor" button ────────────────────────── */
+    .code-wrapper { position: relative; margin: 6px 0; }
+    .code-wrapper pre { margin: 0; }
+    .insert-btn {
+      position: absolute;
+      top: 6px;
+      right: 8px;
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+      border: none;
+      border-radius: 3px;
+      padding: 2px 7px;
+      font-size: 10px;
+      font-weight: 600;
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity 0.15s;
+      letter-spacing: 0.04em;
+    }
+    .code-wrapper:hover .insert-btn { opacity: 1; }
+    .insert-btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+    .insert-btn:active { transform: scale(0.96); }
 
     .streaming-cursor::after {
       content: '\u258D';
@@ -682,7 +752,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <div id="error-toast"></div>
 
   <div id="inputarea">
-    <textarea id="input" placeholder="Ask anything\u2026"></textarea>
+    <textarea id="input" placeholder="Ask anything\u2026 Use @path/to/file to attach files."></textarea>
     <div id="footer">
       <select id="model-select" title="DeepSeek model"></select>
       <span class="footer-spacer"></span>
@@ -871,6 +941,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
     }
 
+    function addInsertButtons(body) {
+      body.querySelectorAll('pre').forEach((pre) => {
+        if (pre.closest('.code-wrapper')) return; // already wrapped
+        const codeEl = pre.querySelector('code');
+        if (!codeEl) return;
+        const rawCode = codeEl.textContent || '';
+        const wrapper = document.createElement('div');
+        wrapper.className = 'code-wrapper';
+        pre.parentNode.insertBefore(wrapper, pre);
+        wrapper.appendChild(pre);
+        const btn = document.createElement('button');
+        btn.className = 'insert-btn';
+        btn.title = 'Insert at cursor';
+        btn.textContent = 'Insert \u2191';
+        btn.addEventListener('click', () => {
+          vscode.postMessage({ type: 'insertCode', code: rawCode });
+          btn.textContent = 'Inserted \u2713';
+          setTimeout(() => { btn.textContent = 'Insert \u2191'; }, 1500);
+        });
+        wrapper.appendChild(btn);
+      });
+    }
+
     function finaliseAssistant() {
       if (currentAssistantBody) {
         currentAssistantBody.classList.remove('streaming-cursor');
@@ -878,6 +971,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           // Remove empty bubbles (only tool calls, no text).
           const bubble = currentAssistantBody.parentElement;
           bubble && bubble.remove();
+        } else {
+          addInsertButtons(currentAssistantBody);
         }
         currentAssistantBody = null;
         placeholderEl = null;
@@ -893,6 +988,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         case 'write_file':      return '\u{270F}\uFE0F';
         case 'apply_edit':      return '\u{1F4DD}';
         case 'get_diagnostics': return '\u{1F41E}';
+        case 'get_git_status':  return '\u{1F500}';
+        case 'run_command':     return '\u{1F4BB}';
         default:                return '\u{1F527}';
       }
     }
@@ -905,6 +1002,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         write_file: 'Write',
         apply_edit: 'Edit',
         get_diagnostics: 'Diagnostics',
+        get_git_status: 'Git status',
+        run_command: 'Run',
       })[name] || name;
     }
 

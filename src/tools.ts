@@ -1,3 +1,4 @@
+import * as childProcess from 'child_process';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
@@ -128,6 +129,51 @@ export const TOOL_DEFINITIONS = [
   {
     type: 'function',
     function: {
+      name: 'get_git_status',
+      description:
+        'Read the current git state of the workspace: status (staged/unstaged files), diff summary and recent commits. ' +
+        'Use this to understand what has changed before planning or debugging.',
+      parameters: {
+        type: 'object',
+        properties: {
+          include_diff: {
+            type: 'boolean',
+            description:
+              'If true, also include the full `git diff` for unstaged changes (can be large). Default false.',
+          },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'run_command',
+      description:
+        'Execute a shell command in the workspace root. ' +
+        'The user MUST approve before the command runs. ' +
+        'Use for build/test/lint steps, not for destructive operations. ' +
+        'Prefer specific tools (read_file, apply_edit) when they cover the need.',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: {
+            type: 'string',
+            description: 'The shell command to run, e.g. "npm test" or "go build ./...".',
+          },
+          working_directory: {
+            type: 'string',
+            description:
+              'Optional workspace-relative directory to run the command in. Defaults to workspace root.',
+          },
+        },
+        required: ['command'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'get_diagnostics',
       description:
         'Read the current Problems panel of VS Code (errors, warnings, hints from linters and language servers). Use this in Debug mode to find what is broken before reading code.',
@@ -156,13 +202,14 @@ export type ChatMode = 'ask' | 'plan' | 'debug' | 'agent';
 
 const MODE_TOOLS: Record<ChatMode, readonly string[]> = {
   ask: [],
-  plan: ['read_file', 'list_directory', 'search_workspace', 'get_open_files'],
+  plan: ['read_file', 'list_directory', 'search_workspace', 'get_open_files', 'get_git_status'],
   debug: [
     'read_file',
     'list_directory',
     'search_workspace',
     'get_open_files',
     'get_diagnostics',
+    'get_git_status',
   ],
   agent: [
     'read_file',
@@ -172,6 +219,8 @@ const MODE_TOOLS: Record<ChatMode, readonly string[]> = {
     'write_file',
     'apply_edit',
     'get_diagnostics',
+    'get_git_status',
+    'run_command',
   ],
 };
 
@@ -237,6 +286,13 @@ export async function executeTool(
         return getDiagnostics(
           args.path ? String(args.path) : undefined,
           args.severity ? String(args.severity) : 'warning'
+        );
+      case 'get_git_status':
+        return await getGitStatus(args.include_diff === true);
+      case 'run_command':
+        return await runCommand(
+          String(args.command ?? ''),
+          args.working_directory ? String(args.working_directory) : undefined
         );
       default:
         return `Error: unknown tool "${name}"`;
@@ -329,6 +385,76 @@ async function searchWorkspace(
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// ─── Git ─────────────────────────────────────────────────────────────────────
+
+async function getGitStatus(includeDiff: boolean): Promise<string> {
+  const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!cwd) return 'Error: no workspace folder open.';
+
+  const run = (cmd: string): Promise<string> =>
+    new Promise((resolve) => {
+      childProcess.exec(cmd, { cwd, timeout: 15_000 }, (err, stdout, stderr) => {
+        resolve(err ? `(error: ${stderr.trim() || err.message})` : stdout.trim());
+      });
+    });
+
+  const [status, diffStat, log] = await Promise.all([
+    run('git status --short'),
+    run('git diff --stat'),
+    run('git log --oneline -10'),
+  ]);
+
+  const diff = includeDiff ? '\n\n### Diff\n' + (await run('git diff')) : '';
+
+  const parts: string[] = [
+    '### Git Status',
+    status || '(clean working tree)',
+    '\n### Diff stat',
+    diffStat || '(no unstaged changes)',
+    '\n### Recent commits',
+    log || '(no commits)',
+  ];
+
+  if (diff) parts.push(diff);
+  return parts.join('\n');
+}
+
+// ─── Run command ──────────────────────────────────────────────────────────────
+
+async function runCommand(command: string, relCwd?: string): Promise<string> {
+  if (!command.trim()) return 'Error: command is required';
+
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!root) return 'Error: no workspace folder open.';
+
+  const cwd = relCwd ? path.resolve(root, relCwd.replace(/^[./\\]+/, '')) : root;
+
+  const confirm = await vscode.window.showWarningMessage(
+    `DeepSeek wants to run:\n${command}`,
+    { modal: true },
+    'Allow',
+    'Deny'
+  );
+
+  if (confirm !== 'Allow') return 'User denied the command.';
+
+  return new Promise<string>((resolve) => {
+    childProcess.exec(
+      command,
+      { cwd, timeout: 60_000, maxBuffer: 1024 * 1024 },
+      (err, stdout, stderr) => {
+        const out = [stdout.trim(), stderr.trim()].filter(Boolean).join('\n');
+        if (err && !out) {
+          resolve(`Error (exit ${err.code ?? '?'}): ${err.message}`);
+        } else {
+          const header = err ? `Exit code ${err.code ?? '?'}\n` : '';
+          resolve(header + (out || '(no output)'));
+        }
+      }
+    );
+  });
 }
 
 function getDiagnostics(rel: string | undefined, severityName: string): string {
