@@ -115,7 +115,8 @@ export const TOOL_DEFINITIONS = [
           old_text: {
             type: 'string',
             description:
-              'Exact text to find. Must be unique in the file. Include enough surrounding context to disambiguate.',
+              'Exact text to find. Must be unique in the file. Include enough surrounding context to disambiguate. ' +
+              'Copy from read_file output; on Windows match CRLF (\\r\\n) or the tool will try LF variants automatically.',
           },
           new_text: {
             type: 'string',
@@ -690,16 +691,16 @@ async function applyEdit(
   const data = await vscode.workspace.fs.readFile(uri);
   const original = Buffer.from(data).toString('utf-8');
 
-  const idx = original.indexOf(oldText);
-  if (idx === -1) {
-    return `Error: old_text not found in "${rel}". Re-read the file and provide an exact match.`;
+  const span = findUniqueOldTextSpan(original, oldText);
+  if (!span) {
+    return (
+      `Error: old_text not found in "${rel}" (or it matches multiple places). ` +
+      `Re-read the file with read_file. Match line endings (CRLF vs LF) and copy the exact snippet including indentation.`
+    );
   }
-  if (original.indexOf(oldText, idx + 1) !== -1) {
-    return `Error: old_text matches multiple locations in "${rel}". Add more surrounding context to make it unique.`;
-  }
+  const [start, end] = span;
 
-  const updated =
-    original.slice(0, idx) + newText + original.slice(idx + oldText.length);
+  const updated = original.slice(0, start) + newText + original.slice(end);
 
   const confirm = await vscode.window.showWarningMessage(
     `DeepSeek wants to edit "${rel}" (${describeChange(oldText, newText)}). Allow?`,
@@ -722,6 +723,28 @@ async function applyEdit(
 
   await vscode.workspace.fs.writeFile(uri, Buffer.from(updated, 'utf-8'));
   return `Edited "${rel}" successfully.`;
+}
+
+/**
+ * Find a unique [start, end) span matching oldText, trying CRLF/LF variants
+ * so edits work on Windows files when the model pasted LF-only snippets.
+ */
+function findUniqueOldTextSpan(original: string, oldText: string): [number, number] | null {
+  const variants: string[] = [];
+  const add = (s: string): void => {
+    if (s && !variants.includes(s)) variants.push(s);
+  };
+  add(oldText);
+  add(oldText.replace(/\r\n/g, '\n'));
+  add(oldText.replace(/\n/g, '\r\n'));
+
+  for (const v of variants) {
+    const idx = original.indexOf(v);
+    if (idx === -1) continue;
+    if (original.indexOf(v, idx + 1) !== -1) continue;
+    return [idx, idx + v.length];
+  }
+  return null;
 }
 
 async function ensureParentExists(uri: vscode.Uri): Promise<void> {

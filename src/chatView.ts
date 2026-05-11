@@ -487,17 +487,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async saveCurrentConversation(name: string): Promise<void> {
-    if (this.history.length === 0) return;
+    if (!this.history.some((m) => m.role === 'user')) {
+      throw new Error('No user messages to save.');
+    }
     const all = this.listSavedConversations();
     const conversation: SavedConversation = {
       id: crypto.randomBytes(6).toString('hex'),
       name: name.trim() || `Chat ${new Date().toLocaleString()}`,
       savedAt: Date.now(),
-      messages: this.history,
+      // Deep clone so globalState always gets plain JSON.
+      messages: JSON.parse(JSON.stringify(this.history)) as Message[],
     };
-    // Cap at 50 most recent to keep globalState lean.
     const updated = [conversation, ...all].slice(0, 50);
-    await this.context.globalState.update(HISTORY_KEY, updated);
+    try {
+      await this.context.globalState.update(HISTORY_KEY, updated);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `${msg} — If the chat is very long, use Export instead; VS Code storage has limits.`
+      );
+    }
     this.broadcastSavedList();
   }
 
@@ -638,20 +647,39 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             .update('model', this.model, vscode.ConfigurationTarget.Global);
         }
         break;
-      case 'saveConversation':
-        if (this.history.length === 0) {
+      case 'saveConversation': {
+        if (!this.history.some((m) => m.role === 'user')) {
           this.postWebview({
             type: 'error',
-            text: 'Nothing to save — start a chat first.',
+            text: 'Nothing to save — send at least one message first.',
           });
           break;
         }
-        await this.saveCurrentConversation(msg.name ?? '');
-        this.postWebview({
-          type: 'info',
-          text: 'Conversation saved.',
+        const defaultName = `Chat ${new Date().toLocaleString()}`;
+        const name = await vscode.window.showInputBox({
+          title: 'DeepSeek — Save conversation',
+          prompt: 'Name for this saved chat',
+          value: typeof msg.name === 'string' && msg.name.trim() ? msg.name : defaultName,
+          ignoreFocusOut: true,
         });
+        if (name === undefined) {
+          this.postWebview({ type: 'info', text: 'Save cancelled.' });
+          break;
+        }
+        if (!name.trim()) {
+          this.postWebview({ type: 'error', text: 'Enter a name or cancel.' });
+          break;
+        }
+        try {
+          await this.saveCurrentConversation(name);
+          this.postWebview({ type: 'info', text: 'Conversation saved.' });
+        } catch (err) {
+          const text = err instanceof Error ? err.message : String(err);
+          vscode.window.showErrorMessage(`DeepSeek: ${text}`);
+          this.postWebview({ type: 'error', text });
+        }
         break;
+      }
       case 'loadConversation':
         if (msg.id) await this.loadConversation(msg.id);
         break;
@@ -1349,8 +1377,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     document.addEventListener('click', () => { historyMenu.style.display = 'none'; });
 
     btnSave.addEventListener('click', () => {
-      const name = prompt('Name for this conversation:', 'My chat');
-      if (name !== null) vscode.postMessage({ type: 'saveConversation', name });
+      vscode.postMessage({ type: 'saveConversation' });
     });
 
     btnExport.addEventListener('click', () => {
