@@ -3,6 +3,21 @@
 A private AI coding **agent** for VS Code powered by [DeepSeek](https://api.deepseek.com).
 Lives in its own sidebar tab, can read your files, search the workspace and edit code with confirmation diffs.
 
+## Table of contents
+
+- [Features](#features)
+- [Screenshots](#screenshots-what-each-image-shows)
+- [Install](#install)
+- [Setting your API key](#setting-your-api-key)
+- [Commands](#commands)
+- [Settings](#settings)
+- [Agent tools](#agent-tools)
+- [Project rules](#project-rules-deepseekrulesfiles)
+- [Models](#models)
+- [Status bar](#status-bar)
+- [Development](#development)
+- [Troubleshooting](#troubleshooting)
+
 ## Features
 
 - **Sidebar chat** with persistent conversation history
