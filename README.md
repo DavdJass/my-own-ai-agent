@@ -19,11 +19,12 @@ Lives in its own sidebar tab, can read your files, search the workspace and edit
 - **Configurable rules** — `deepseek.rulesFiles` (default starts with `DEEPSEEK.md`, then `AGENTS.md`, etc.); first existing file is injected into the system prompt
 
   <img width="1895" height="1132" alt="image" src="https://github.com/user-attachments/assets/e89bcbc4-4e0c-4022-a645-6b41e85bd8fa" />
-
+  - **You can chose between Ask, Plan, Debug and Agent mode**
   <img width="589" height="120" alt="image" src="https://github.com/user-attachments/assets/5d01da50-50ac-4206-9b04-f3274144c899" />
   <img width="580" height="80" alt="image" src="https://github.com/user-attachments/assets/798211de-095c-4357-81e7-a76a8c137fd3" />
   <img width="575" height="91" alt="image" src="https://github.com/user-attachments/assets/f18ae88a-9bb2-4788-adb1-1c9d75d11f50" />
   <img width="568" height="72" alt="image" src="https://github.com/user-attachments/assets/347b45dd-2946-4c49-ad4e-f987c13e9713" />
+  - **Select DeepSeek Flash o V4-Pro, and THE BEST FEATURE, you can find out how many dollars are you spelling per request**
   <img width="596" height="121" alt="image" src="https://github.com/user-attachments/assets/8502ce81-30b2-41b5-993d-5ba2852dcfb8" />
 
 
