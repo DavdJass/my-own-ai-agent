@@ -18,20 +18,80 @@ Lives in its own sidebar tab, can read your files, search the workspace and edit
 - **Export chat** — clipboard Markdown of the full thread (toolbar, view title, or command `DeepSeek: Export Chat to Clipboard`)
 - **Configurable rules** — `deepseek.rulesFiles` (default starts with `DEEPSEEK.md`, then `AGENTS.md`, etc.); first existing file is injected into the system prompt
 
-  <img width="1895" height="1132" alt="image" src="https://github.com/user-attachments/assets/e89bcbc4-4e0c-4022-a645-6b41e85bd8fa" />
-  - **You can chose between Ask, Plan, Debug and Agent mode**
-  <img width="589" height="120" alt="image" src="https://github.com/user-attachments/assets/5d01da50-50ac-4206-9b04-f3274144c899" />
-  <img width="580" height="80" alt="image" src="https://github.com/user-attachments/assets/798211de-095c-4357-81e7-a76a8c137fd3" />
-  <img width="575" height="91" alt="image" src="https://github.com/user-attachments/assets/f18ae88a-9bb2-4788-adb1-1c9d75d11f50" />
-  <img width="568" height="72" alt="image" src="https://github.com/user-attachments/assets/347b45dd-2946-4c49-ad4e-f987c13e9713" />
-  - **Select DeepSeek Flash o V4-Pro, and THE BEST FEATURE, you can find out how many dollars are you spelling per request**
-  <img width="596" height="121" alt="image" src="https://github.com/user-attachments/assets/8502ce81-30b2-41b5-993d-5ba2852dcfb8" />
+## Screenshots (what each image shows)
 
+Below is a short tour of the UI. Click any image on GitHub to open it full size.
 
+### 1. Full workspace — where the extension lives
 
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/e89bcbc4-4e0c-4022-a645-6b41e85bd8fa" alt="VS Code with DeepSeek Coder sidebar open: activity bar icon, chat panel, and editor" width="920" />
+</p>
 
+**What you see:** VS Code with the **DeepSeek Coder** view open in the **secondary sidebar** (right). The **activity bar** on the far left includes the extension icon so you can open the chat in one click. The main editor stays on the left so you can keep coding while the agent answers.
 
+**Tip:** Use `Ctrl+Shift+D` (`Cmd+Shift+D` on macOS) to focus the chat from anywhere.
 
+---
+
+### 2. Modes — Ask, Plan, Debug, Agent
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/5d01da50-50ac-4206-9b04-f3274144c899" alt="Mode pills: Ask, Plan, Debug, Agent" width="560" />
+</p>
+
+**What you see:** The **mode selector** at the top of the chat. Each mode changes what the model is allowed to do:
+
+| Mode | Purpose |
+|------|--------|
+| **Ask** | Chat only — no tools, no file access. Good for concepts and quick questions. |
+| **Plan** | Read-only tools — explores the repo and returns a **written plan**; it cannot edit files. |
+| **Debug** | Read-only + diagnostics + git — investigates errors; suggests fixes in chat but does not apply edits. |
+| **Agent** | Full tools — can read, search, run commands (with approval), and **edit files** after you confirm the diff. |
+
+---
+
+### 3. Mode hint strip (context for the current mode)
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/798211de-095c-4357-81e7-a76a8c137fd3" alt="Hint text under mode pills describing the active mode" width="560" />
+</p>
+
+**What you see:** A **one-line hint** under the mode pills so you always know what the active mode can and cannot do (for example, that Plan mode will not write to disk).
+
+---
+
+### 4. Chat toolbar — history, save, export, clear
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/f18ae88a-9bb2-4788-adb1-1c9d75d11f50" alt="Toolbar icons: saved conversations, save, export, clear" width="560" />
+</p>
+
+**What you see:** Icons next to **Clear** for **saved conversations** (open the dropdown to load or delete a saved chat), **save current thread** (opens VS Code’s native name prompt — not the browser `prompt`), and related actions. **Export** copies the whole conversation as Markdown to the clipboard.
+
+---
+
+### 5. Composer — input, slash hints, typing / thinking
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/347b45dd-2946-4c49-ad4e-f987c13e9713" alt="Chat textarea with placeholder for @files, @selection, and slash commands" width="560" />
+</p>
+
+**What you see:** The **message box** and shortcuts: type **`@path/to/file`** to attach a file, **`@selection`** to attach the current editor selection, or **`/explain`**, **`/test`**, etc. While the model streams, **Flash** shows a *Typing* indicator and **Pro** can show *Thinking* during reasoning before the visible answer appears.
+
+---
+
+### 6. Model picker and session cost (tokens + ~USD)
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/8502ce81-30b2-41b5-993d-5ba2852dcfb8" alt="Footer: model dropdown deepseek-v4-flash or pro, token count and approximate dollar cost" width="600" />
+</p>
+
+**What you see:** The **footer** of the chat: a dropdown to switch between **`deepseek-v4-flash`** and **`deepseek-v4-pro`**, and a **session usage** line (emoji + prompt/completion token counts and an **approximate USD cost** for the current chat session, using published list prices — useful to see how much each long agent run is spending).
+
+**Note:** Figures are **estimates** (API usage × list price); your DeepSeek invoice is the source of truth.
+
+---
 
 ## Install
 
