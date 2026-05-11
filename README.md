@@ -51,37 +51,7 @@ Below is a short tour of the UI. Click any image on GitHub to open it full size.
 
 ---
 
-### 3. Mode hint strip (context for the current mode)
-
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/798211de-095c-4357-81e7-a76a8c137fd3" alt="Hint text under mode pills describing the active mode" width="560" />
-</p>
-
-**What you see:** A **one-line hint** under the mode pills so you always know what the active mode can and cannot do (for example, that Plan mode will not write to disk).
-
----
-
-### 4. Chat toolbar — history, save, export, clear
-
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/f18ae88a-9bb2-4788-adb1-1c9d75d11f50" alt="Toolbar icons: saved conversations, save, export, clear" width="560" />
-</p>
-
-**What you see:** Icons next to **Clear** for **saved conversations** (open the dropdown to load or delete a saved chat), **save current thread** (opens VS Code’s native name prompt — not the browser `prompt`), and related actions. **Export** copies the whole conversation as Markdown to the clipboard.
-
----
-
-### 5. Composer — input, slash hints, typing / thinking
-
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/347b45dd-2946-4c49-ad4e-f987c13e9713" alt="Chat textarea with placeholder for @files, @selection, and slash commands" width="560" />
-</p>
-
-**What you see:** The **message box** and shortcuts: type **`@path/to/file`** to attach a file, **`@selection`** to attach the current editor selection, or **`/explain`**, **`/test`**, etc. While the model streams, **Flash** shows a *Typing* indicator and **Pro** can show *Thinking* during reasoning before the visible answer appears.
-
----
-
-### 6. Model picker and session cost (tokens + ~USD)
+### 3. Model picker and session cost (tokens + ~USD)
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/8502ce81-30b2-41b5-993d-5ba2852dcfb8" alt="Footer: model dropdown deepseek-v4-flash or pro, token count and approximate dollar cost" width="600" />
