@@ -53,6 +53,12 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
+    vscode.commands.registerCommand('deepseek.exportChat', () => {
+      void chatProvider.exportToClipboard();
+    })
+  );
+
+  context.subscriptions.push(
     vscode.commands.registerCommand('deepseek.clearChat', () => {
       chatProvider.clear();
     })

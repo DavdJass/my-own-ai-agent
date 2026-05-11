@@ -1,14 +1,62 @@
 import * as crypto from 'crypto';
 import * as vscode from 'vscode';
-import { DeepSeekClient, Message, ToolCall } from './client';
+import { DeepSeekClient, Message, ToolCall, TokenUsage } from './client';
 import { ChatMode, executeTool, toolsForMode } from './tools';
 
 const MAX_AGENT_ITERATIONS = 8;
 const MODE_KEY = 'deepseek.mode';
 const MODEL_KEY = 'deepseek.activeModel';
+const HISTORY_KEY = 'deepseek.savedConversations';
 
 const AVAILABLE_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro'] as const;
 const AVAILABLE_MODES: ChatMode[] = ['ask', 'plan', 'debug', 'agent'];
+
+/** Approximate USD pricing per 1M tokens (input / output). Update if DeepSeek changes them. */
+const MODEL_PRICING: Record<string, { input: number; output: number }> = {
+  'deepseek-v4-flash': { input: 0.07, output: 0.28 },
+  'deepseek-v4-pro': { input: 0.27, output: 1.1 },
+};
+
+/** Slash commands expanded before sending. */
+const SLASH_COMMANDS: Record<string, { label: string; expand: (rest: string) => string }> = {
+  '/explain': {
+    label: 'Explain selection / file',
+    expand: (rest) =>
+      `Explain ${rest || 'the active code'} in detail. Walk through what it does, why, and any pitfalls.`,
+  },
+  '/test': {
+    label: 'Generate tests',
+    expand: (rest) =>
+      `Generate unit tests for ${rest || 'the active file'}. Use the testing framework already present in the project. Cover happy path and edge cases.`,
+  },
+  '/docs': {
+    label: 'Add documentation',
+    expand: (rest) =>
+      `Add docstrings / JSDoc / GoDoc style documentation to ${rest || 'the active file'}. Do not change logic.`,
+  },
+  '/optimize': {
+    label: 'Optimize code',
+    expand: (rest) =>
+      `Find performance and readability improvements in ${rest || 'the active file'}. Show the proposed change and explain why.`,
+  },
+  '/refactor': {
+    label: 'Refactor code',
+    expand: (rest) =>
+      `Refactor ${rest || 'the active file'} to be cleaner and more idiomatic. Preserve behavior. Show diffs.`,
+  },
+  '/fix': {
+    label: 'Fix problems',
+    expand: (rest) =>
+      `Read the diagnostics and fix the problems in ${rest || 'the active file'}. Use apply_edit for the changes.`,
+  },
+};
+
+interface SavedConversation {
+  id: string;
+  name: string;
+  savedAt: number;
+  messages: Message[];
+}
 
 const MODE_PROMPTS: Record<ChatMode, string> = {
   ask:
@@ -56,6 +104,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private mode: ChatMode;
   private model: string;
 
+  /** Running total tokens & cost for the current chat session. */
+  private sessionUsage = { prompt: 0, completion: 0, costUsd: 0 };
+
   constructor(client: DeepSeekClient, context: vscode.ExtensionContext) {
     this.client = client;
     this.context = context;
@@ -80,19 +131,30 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     view.webview.html = this.buildHtml();
     view.webview.onDidReceiveMessage(this.onMessage.bind(this));
 
-    // Send initial state to the webview (mode + model + lists).
+    // Send initial state to the webview (mode + model + lists + slash commands + saved chats).
     this.postWebview({
       type: 'init',
       mode: this.mode,
       model: this.model,
       modes: AVAILABLE_MODES,
       models: AVAILABLE_MODELS,
+      slashCommands: Object.entries(SLASH_COMMANDS).map(([cmd, def]) => ({
+        cmd,
+        label: def.label,
+      })),
+      savedConversations: this.listSavedConversations().map((c) => ({
+        id: c.id,
+        name: c.name,
+        savedAt: c.savedAt,
+      })),
     });
 
     while (this.pendingUserMessages.length > 0) {
       const text = this.pendingUserMessages.shift()!;
       this.processChat(text);
     }
+
+    this.broadcastUsage();
   }
 
   /** Reveal the sidebar (opens it if collapsed) and feed it a message. */
@@ -110,18 +172,44 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   /** Reset the conversation and clear the visible messages. */
   clear(): void {
     this.history = [];
+    this.sessionUsage = { prompt: 0, completion: 0, costUsd: 0 };
     this.abortController?.abort();
     this.postWebview({ type: 'clearAll' });
+    this.broadcastUsage();
+  }
+
+  private broadcastUsage(): void {
+    this.postWebview({
+      type: 'usage',
+      prompt: this.sessionUsage.prompt,
+      completion: this.sessionUsage.completion,
+      costUsd: this.sessionUsage.costUsd,
+    });
+  }
+
+  private accumulateUsage(usage: TokenUsage | undefined): void {
+    if (!usage) return;
+    const pricing = MODEL_PRICING[this.model] ?? MODEL_PRICING['deepseek-v4-flash'];
+    const cost =
+      (usage.prompt * pricing.input) / 1_000_000 +
+      (usage.completion * pricing.output) / 1_000_000;
+    this.sessionUsage.prompt += usage.prompt;
+    this.sessionUsage.completion += usage.completion;
+    this.sessionUsage.costUsd += cost;
+    this.broadcastUsage();
   }
 
   // ─── Agent loop ────────────────────────────────────────────────────────────
 
   private async processChat(userText: string): Promise<void> {
-    // Resolve @mentions before sending to the model.
-    const resolvedText = await this.resolveAtMentions(userText);
+    // Expand /slash commands first, then resolve @mentions.
+    const expanded = this.expandSlashCommand(userText);
+    const resolvedText = await this.resolveAtMentions(expanded);
 
     // Re-seed the system prompt every turn so mode switches mid-conversation
-    // take effect (we keep only the latest system message).
+    // take effect (we keep only the latest system message). Project rules
+    // (AGENTS.md / .cursorrules) are read freshly each turn.
+    await this.refreshSystemPrompt();
     this.history = this.history.filter((m) => m.role !== 'system');
     this.history.unshift({ role: 'system', content: this.buildSystemPrompt() });
     this.history.push({ role: 'user', content: resolvedText });
@@ -167,6 +255,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 }))
               : undefined,
         });
+
+        this.accumulateUsage(result.usage);
 
         if (result.toolCalls.length === 0 || !allowTools) break;
 
@@ -251,6 +341,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         return args.include_diff ? 'with diff' : 'status + log';
       case 'run_command':
         return String(args.command ?? '');
+      case 'find_workspace_symbols':
+        return String(args.query ?? '');
+      case 'get_document_outline':
+        return String(args.path ?? '');
       default:
         return '';
     }
@@ -263,14 +357,35 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async resolveAtMentions(text: string): Promise<string> {
     const root = vscode.workspace.workspaceFolders?.[0]?.uri;
-    if (!root) return text;
+    const attachments: string[] = [];
+
+    if (text.includes('@selection')) {
+      const editor = vscode.window.activeTextEditor;
+      if (editor && !editor.selection.isEmpty) {
+        const sel = editor.document.getText(editor.selection);
+        const lang = editor.document.languageId;
+        const rel = vscode.workspace.asRelativePath(editor.document.uri);
+        const truncated =
+          sel.length > 12000 ? sel.slice(0, 12000) + '\n// ... (truncated)' : sel;
+        attachments.push(
+          `**Editor selection** from \`${rel}\` (${lang}):\n\`\`\`${lang}\n${truncated}\n\`\`\``
+        );
+      } else {
+        attachments.push(
+          '*(User wrote @selection but no text is selected in the active editor.)*'
+        );
+      }
+    }
+
+    if (!root) {
+      if (attachments.length === 0) return text;
+      return text + '\n\n---\n' + attachments.join('\n\n');
+    }
 
     const matches = [...text.matchAll(/@([\w./\\-]+)/g)];
-    if (matches.length === 0) return text;
-
-    const attachments: string[] = [];
     for (const match of matches) {
       const rel = match[1];
+      if (rel === 'selection') continue;
       try {
         const uri = vscode.Uri.joinPath(root, rel);
         const data = await vscode.workspace.fs.readFile(uri);
@@ -287,13 +402,69 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     if (attachments.length === 0) return text;
-    return text + '\n\n---\n*Attached via @mention:*\n' + attachments.join('\n\n');
+    return text + '\n\n---\n*Attached context:*\n' + attachments.join('\n\n');
+  }
+
+  private expandSlashCommand(text: string): string {
+    const trimmed = text.trimStart();
+    const match = trimmed.match(/^(\/\w+)(\s+([\s\S]*))?$/);
+    if (!match) return text;
+    const cmd = match[1].toLowerCase();
+    const rest = (match[3] ?? '').trim();
+    const def = SLASH_COMMANDS[cmd];
+    return def ? def.expand(rest) : text;
+  }
+
+  private async readProjectRules(): Promise<string | undefined> {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!root) return undefined;
+
+    const configured = vscode.workspace
+      .getConfiguration('deepseek')
+      .get<string[]>('rulesFiles');
+    const defaultList = [
+      'DEEPSEEK.md',
+      'AGENTS.md',
+      '.deepseekrules.md',
+      '.deepseekrules',
+      '.cursorrules',
+    ];
+    const candidates =
+      Array.isArray(configured) && configured.length > 0 ? configured : defaultList;
+
+    for (const name of candidates) {
+      if (!name || typeof name !== 'string') continue;
+      try {
+        const data = await vscode.workspace.fs.readFile(
+          vscode.Uri.joinPath(root, name.replace(/^[./\\]+/, ''))
+        );
+        const content = Buffer.from(data).toString('utf-8').trim();
+        if (content) {
+          const truncated =
+            content.length > 4000 ? content.slice(0, 4000) + '\n... (truncated)' : content;
+          return `Project conventions from \`${name}\`:\n${truncated}`;
+        }
+      } catch {
+        /* file does not exist, try next */
+      }
+    }
+    return undefined;
   }
 
   private buildSystemPrompt(): string {
+    // Note: this is a sync method but we cache project rules asynchronously.
+    // We use a synchronous wrapper that returns the cached value.
+    return this.cachedSystemPrompt ?? this.composeSystemPrompt();
+  }
+
+  private cachedSystemPrompt?: string;
+
+  private composeSystemPrompt(rules?: string): string {
     const root =
       vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '(no workspace)';
     const parts = [MODE_PROMPTS[this.mode], `\nWorkspace root: ${root}`];
+
+    if (rules) parts.push(`\n${rules}`);
 
     const editor = vscode.window.activeTextEditor;
     if (editor) {
@@ -302,6 +473,115 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     return parts.join('\n');
+  }
+
+  private async refreshSystemPrompt(): Promise<void> {
+    const rules = await this.readProjectRules();
+    this.cachedSystemPrompt = this.composeSystemPrompt(rules);
+  }
+
+  // ─── Saved conversations ───────────────────────────────────────────────────
+
+  private listSavedConversations(): SavedConversation[] {
+    return this.context.globalState.get<SavedConversation[]>(HISTORY_KEY) ?? [];
+  }
+
+  private async saveCurrentConversation(name: string): Promise<void> {
+    if (this.history.length === 0) return;
+    const all = this.listSavedConversations();
+    const conversation: SavedConversation = {
+      id: crypto.randomBytes(6).toString('hex'),
+      name: name.trim() || `Chat ${new Date().toLocaleString()}`,
+      savedAt: Date.now(),
+      messages: this.history,
+    };
+    // Cap at 50 most recent to keep globalState lean.
+    const updated = [conversation, ...all].slice(0, 50);
+    await this.context.globalState.update(HISTORY_KEY, updated);
+    this.broadcastSavedList();
+  }
+
+  private async loadConversation(id: string): Promise<void> {
+    const conv = this.listSavedConversations().find((c) => c.id === id);
+    if (!conv) return;
+    this.history = conv.messages;
+    this.sessionUsage = { prompt: 0, completion: 0, costUsd: 0 };
+    this.postWebview({ type: 'replayHistory', messages: this.serializeHistory() });
+    this.broadcastUsage();
+  }
+
+  private async deleteConversation(id: string): Promise<void> {
+    const remaining = this.listSavedConversations().filter((c) => c.id !== id);
+    await this.context.globalState.update(HISTORY_KEY, remaining);
+    this.broadcastSavedList();
+  }
+
+  private broadcastSavedList(): void {
+    this.postWebview({
+      type: 'savedConversations',
+      list: this.listSavedConversations().map((c) => ({
+        id: c.id,
+        name: c.name,
+        savedAt: c.savedAt,
+      })),
+    });
+  }
+
+  /** Serialize full history for Markdown export (includes tool turns). */
+  private buildExportMarkdown(): string {
+    const lines: string[] = [
+      '# DeepSeek Coder — chat export',
+      '',
+      `Exported: ${new Date().toISOString()}`,
+      '',
+      '---',
+      '',
+    ];
+    for (const m of this.history) {
+      if (m.role === 'system') continue;
+      if (m.role === 'user') {
+        lines.push('## User\n\n', m.content, '\n\n');
+      } else if (m.role === 'assistant') {
+        let body = m.content || '';
+        if (m.tool_calls?.length) {
+          const names = m.tool_calls
+            .map((t) => t.function?.name)
+            .filter(Boolean)
+            .join(', ');
+          body += `\n\n_(Tools: ${names})_\n`;
+        }
+        lines.push('## Assistant\n\n', body, '\n\n');
+      } else if (m.role === 'tool') {
+        const preview =
+          m.content.length > 3000 ? m.content.slice(0, 3000) + '\n...' : m.content;
+        lines.push(`### Tool result (${m.tool_call_id ?? '?'})\n\n`, '```\n', preview, '\n```\n\n');
+      }
+    }
+    return lines.join('');
+  }
+
+  /** Copy the current conversation as Markdown to the system clipboard. */
+  async exportToClipboard(): Promise<void> {
+    if (this.history.filter((m) => m.role !== 'system').length === 0) {
+      this.postWebview({ type: 'error', text: 'Nothing to export — start a chat first.' });
+      return;
+    }
+    const md = this.buildExportMarkdown();
+    await vscode.env.clipboard.writeText(md);
+    vscode.window.showInformationMessage(
+      'DeepSeek: conversation copied to clipboard as Markdown.'
+    );
+    this.postWebview({ type: 'info', text: 'Exported to clipboard (Markdown).' });
+  }
+
+  /** Pre-render the history into webview-friendly entries for replay. */
+  private serializeHistory(): unknown[] {
+    return this.history
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .map((m) => ({
+        role: m.role,
+        content: m.content,
+      }));
   }
 
   private postWebview(msg: Record<string, unknown>): void {
@@ -314,6 +594,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     code?: string;
     mode?: string;
     model?: string;
+    name?: string;
+    id?: string;
   }): Promise<void> {
     switch (msg.type) {
       case 'send':
@@ -324,6 +606,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break;
       case 'clear':
         this.history = [];
+        this.sessionUsage = { prompt: 0, completion: 0, costUsd: 0 };
+        this.broadcastUsage();
         break;
       case 'insertCode': {
         const editor = vscode.window.activeTextEditor;
@@ -353,6 +637,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             .getConfiguration('deepseek')
             .update('model', this.model, vscode.ConfigurationTarget.Global);
         }
+        break;
+      case 'saveConversation':
+        if (this.history.length === 0) {
+          this.postWebview({
+            type: 'error',
+            text: 'Nothing to save — start a chat first.',
+          });
+          break;
+        }
+        await this.saveCurrentConversation(msg.name ?? '');
+        this.postWebview({
+          type: 'info',
+          text: 'Conversation saved.',
+        });
+        break;
+      case 'loadConversation':
+        if (msg.id) await this.loadConversation(msg.id);
+        break;
+      case 'deleteConversation':
+        if (msg.id) await this.deleteConversation(msg.id);
+        break;
+      case 'exportChat':
+        await this.exportToClipboard();
         break;
     }
   }
@@ -421,6 +728,70 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       border-color: var(--vscode-button-background);
     }
     .topbar-spacer { flex: 1; }
+
+    .history-wrap { position: relative; }
+    .topbar-icon {
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 14px;
+      padding: 2px 6px;
+      border-radius: 3px;
+      opacity: 0.85;
+    }
+    .topbar-icon:hover {
+      background: var(--vscode-toolbar-hoverBackground);
+      opacity: 1;
+    }
+    .dropdown {
+      position: absolute;
+      right: 0;
+      top: 100%;
+      margin-top: 4px;
+      min-width: 200px;
+      max-height: 240px;
+      overflow-y: auto;
+      background: var(--vscode-dropdown-background);
+      color: var(--vscode-dropdown-foreground);
+      border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border));
+      border-radius: 4px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+      z-index: 50;
+    }
+    .dropdown-item {
+      display: block;
+      width: 100%;
+      text-align: left;
+      padding: 6px 10px;
+      font-size: 12px;
+      border: none;
+      background: transparent;
+      color: inherit;
+      cursor: pointer;
+    }
+    .dropdown-item:hover { background: var(--vscode-list-hoverBackground); }
+    .dropdown-item.del { color: var(--vscode-errorForeground); }
+
+    .usage {
+      font-size: 10px;
+      color: var(--vscode-descriptionForeground);
+      white-space: nowrap;
+      max-width: 140px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    #info-toast {
+      display: none;
+      background: var(--vscode-inputValidation-infoBackground);
+      color: var(--vscode-inputValidation-infoForeground);
+      border: 1px solid var(--vscode-inputValidation-infoBorder);
+      border-radius: 4px;
+      padding: 6px 10px;
+      font-size: 12px;
+      margin: 0 10px 6px;
+    }
+
     #btn-clear {
       background: none;
       border: none;
@@ -732,6 +1103,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <button class="mode-pill" data-mode="debug">Debug</button>
     <button class="mode-pill" data-mode="agent">Agent</button>
     <span class="topbar-spacer"></span>
+    <div class="history-wrap">
+      <button id="btn-history" class="topbar-icon" title="Saved conversations">\u{1F4DA}</button>
+      <div id="history-menu" class="dropdown" style="display:none"></div>
+    </div>
+    <button id="btn-save" class="topbar-icon" title="Save current conversation">\u{1F4BE}</button>
+    <button id="btn-export" class="topbar-icon" title="Export chat to clipboard (Markdown)">\u{1F4CB}</button>
     <button id="btn-clear" title="Clear conversation">Clear</button>
   </div>
   <div id="mode-hint"></div>
@@ -742,19 +1119,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <div class="title">DeepSeek Coder</div>
       <div class="subtitle">Ask, plan, debug or run as an autonomous agent.</div>
       <div class="examples">
+        <button class="example" data-q="/explain ">/explain — explain code</button>
+        <button class="example" data-q="/test ">/test — generate tests</button>
+        <button class="example" data-q="/docs ">/docs — add documentation</button>
         <button class="example" data-q="What does this project do? Read the README and explain.">What does this project do?</button>
-        <button class="example" data-q="Find all TODO comments in the codebase.">Find all TODO comments</button>
-        <button class="example" data-q="Add a docstring to the main function in the active file.">Document my main function</button>
       </div>
     </div>
   </div>
 
   <div id="error-toast"></div>
+  <div id="info-toast"></div>
 
   <div id="inputarea">
-    <textarea id="input" placeholder="Ask anything\u2026 Use @path/to/file to attach files."></textarea>
+    <div id="slash-hint" style="display:none"></div>
+    <textarea id="input" placeholder="Ask anything\u2026 @path/to/file, @selection, or /command shortcuts."></textarea>
     <div id="footer">
       <select id="model-select" title="DeepSeek model"></select>
+      <span id="usage-display" class="usage" title="Tokens & cost this session"></span>
       <span class="footer-spacer"></span>
       <span class="hint">Enter to send</span>
       <button class="secondary" id="btn-stop" style="display:none">Stop</button>
@@ -770,8 +1151,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const btnSend      = document.getElementById('btn-send');
     const btnStop      = document.getElementById('btn-stop');
     const btnClear     = document.getElementById('btn-clear');
+    const btnSave      = document.getElementById('btn-save');
+    const btnExport    = document.getElementById('btn-export');
+    const btnHistory   = document.getElementById('btn-history');
+    const historyMenu  = document.getElementById('history-menu');
     const emptyState   = document.getElementById('empty-state');
     const errorToast   = document.getElementById('error-toast');
+    const infoToast    = document.getElementById('info-toast');
+    const usageDisplay = document.getElementById('usage-display');
     const modePills    = document.querySelectorAll('.mode-pill');
     const modelSelect  = document.getElementById('model-select');
     const modeHintEl   = document.getElementById('mode-hint');
@@ -878,11 +1265,97 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     function scrollBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
 
-    function showError(text) {
-      errorToast.textContent = text;
-      errorToast.style.display = 'block';
-      setTimeout(() => { errorToast.style.display = 'none'; }, 8000);
+    function showInfo(text) {
+      infoToast.textContent = text;
+      infoToast.style.display = 'block';
+      setTimeout(() => { infoToast.style.display = 'none'; }, 4000);
     }
+
+    function updateUsageDisplay(p, c, cost) {
+      if (!usageDisplay) return;
+      const costStr = typeof cost === 'number' ? cost.toFixed(4) : '0';
+      usageDisplay.textContent =
+        p > 0 ? String.fromCodePoint(0x1f4ca) + ' ' + p + '+' + c + ' tok ~$' + costStr : '';
+    }
+
+    function renderReplayMessages(messages) {
+      Array.from(messagesEl.children).forEach((ch) => {
+        if (ch !== emptyState) ch.remove();
+      });
+      if (!messages || messages.length === 0) {
+        emptyState.style.display = '';
+        return;
+      }
+      emptyState.style.display = 'none';
+      for (const m of messages) {
+        if (m.role === 'user') appendUserMessage(m.content);
+        else if (m.role === 'assistant') {
+          rawBuffer = m.content || '';
+          const div = document.createElement('div');
+          div.className = 'msg msg-assistant';
+          div.innerHTML =
+            '<div class="msg-role">ASSISTANT</div>' +
+            '<div class="msg-body">' + renderMarkdown(rawBuffer) + '</div>';
+          messagesEl.appendChild(div);
+          const body = div.querySelector('.msg-body');
+          if (body) addInsertButtons(body);
+        }
+      }
+      scrollBottom();
+    }
+
+    function rebuildHistoryMenu(list) {
+      historyMenu.innerHTML = '';
+      if (!list || list.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'dropdown-item';
+        empty.style.opacity = '0.6';
+        empty.textContent = '(no saved chats)';
+        historyMenu.appendChild(empty);
+        return;
+      }
+      for (const c of list) {
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.alignItems = 'stretch';
+        const loadBtn = document.createElement('button');
+        loadBtn.className = 'dropdown-item';
+        loadBtn.style.flex = '1';
+        loadBtn.textContent = c.name;
+        loadBtn.title = new Date(c.savedAt).toLocaleString();
+        loadBtn.addEventListener('click', () => {
+          vscode.postMessage({ type: 'loadConversation', id: c.id });
+          historyMenu.style.display = 'none';
+        });
+        const delBtn = document.createElement('button');
+        delBtn.className = 'dropdown-item del';
+        delBtn.textContent = '\u2715';
+        delBtn.title = 'Delete';
+        delBtn.style.flex = '0 0 32px';
+        delBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          vscode.postMessage({ type: 'deleteConversation', id: c.id });
+        });
+        row.appendChild(loadBtn);
+        row.appendChild(delBtn);
+        historyMenu.appendChild(row);
+      }
+    }
+
+    btnHistory.addEventListener('click', (e) => {
+      e.stopPropagation();
+      historyMenu.style.display = historyMenu.style.display === 'none' ? 'block' : 'none';
+    });
+    document.addEventListener('click', () => { historyMenu.style.display = 'none'; });
+
+    btnSave.addEventListener('click', () => {
+      const name = prompt('Name for this conversation:', 'My chat');
+      if (name !== null) vscode.postMessage({ type: 'saveConversation', name });
+    });
+
+    btnExport.addEventListener('click', () => {
+      vscode.postMessage({ type: 'exportChat' });
+    });
 
     function setStreaming(val) {
       streaming = val;
@@ -990,6 +1463,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         case 'get_diagnostics': return '\u{1F41E}';
         case 'get_git_status':  return '\u{1F500}';
         case 'run_command':     return '\u{1F4BB}';
+        case 'find_workspace_symbols': return '\u{1F3AF}';
+        case 'get_document_outline': return '\u{1F4D1}';
         default:                return '\u{1F527}';
       }
     }
@@ -1004,6 +1479,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         get_diagnostics: 'Diagnostics',
         get_git_status: 'Git status',
         run_command: 'Run',
+        find_workspace_symbols: 'Symbols',
+        get_document_outline: 'Outline',
       })[name] || name;
     }
 
@@ -1069,6 +1546,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         case 'init':
           updateModePills(msg.mode);
           populateModels(msg.models, msg.model);
+          if (msg.savedConversations) rebuildHistoryMenu(msg.savedConversations);
           break;
         case 'prefill':
           inputEl.value = msg.text;
@@ -1106,6 +1584,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           finaliseAssistant();
           setStreaming(false);
           showError(msg.text);
+          break;
+        case 'info':
+          showInfo(msg.text);
+          break;
+        case 'usage':
+          updateUsageDisplay(msg.prompt, msg.completion, msg.costUsd);
+          break;
+        case 'replayHistory':
+          renderReplayMessages(msg.messages);
+          break;
+        case 'savedConversations':
+          rebuildHistoryMenu(msg.list);
           break;
       }
     });

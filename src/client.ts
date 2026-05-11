@@ -19,10 +19,17 @@ export interface Message {
   tool_call_id?: string;
 }
 
+export interface TokenUsage {
+  prompt: number;
+  completion: number;
+  total: number;
+}
+
 export interface ChatResult {
   content: string;
   reasoningContent: string;
   toolCalls: ToolCall[];
+  usage?: TokenUsage;
 }
 
 export interface ChatOptions {
@@ -87,6 +94,7 @@ export class DeepSeekClient {
       max_tokens: this.maxTokens,
       temperature: this.temperature,
       stream: true,
+      stream_options: { include_usage: true },
     };
     if (options.tools && options.tools.length > 0) {
       payload.tools = options.tools;
@@ -119,6 +127,7 @@ export class DeepSeekClient {
           let buffer = '';
           let content = '';
           let reasoningContent = '';
+          let usage: TokenUsage | undefined;
           // Tool calls arrive incrementally; index → accumulator.
           const toolAccum: Record<number, ToolCall> = {};
 
@@ -126,6 +135,7 @@ export class DeepSeekClient {
             content,
             reasoningContent,
             toolCalls: Object.values(toolAccum).filter((t) => t.name),
+            usage,
           });
 
           res.on('data', (chunk: Buffer) => {
@@ -143,6 +153,16 @@ export class DeepSeekClient {
               }
               try {
                 const parsed = JSON.parse(data);
+
+                // The final chunk before [DONE] carries usage stats.
+                if (parsed.usage) {
+                  usage = {
+                    prompt: parsed.usage.prompt_tokens ?? 0,
+                    completion: parsed.usage.completion_tokens ?? 0,
+                    total: parsed.usage.total_tokens ?? 0,
+                  };
+                }
+
                 const delta = parsed.choices?.[0]?.delta;
                 if (!delta) continue;
 

@@ -2,7 +2,7 @@
   "name": "deepseek-coder",
   "displayName": "DeepSeek Coder",
   "description": "Private AI coding agent powered by DeepSeek — chat with file tools, inline completions, explain & refactor.",
-  "version": "0.5.0",
+  "version": "0.4.2",
   "engines": { "vscode": "^1.90.0" },
   "categories": ["Machine Learning", "Other"],
   "activationEvents": ["onStartupFinished"],

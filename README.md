@@ -12,6 +12,11 @@ Lives in its own sidebar tab, can read your files, search the workspace and edit
 - **Right-click menu** — Explain / Refactor / Generate code on the current selection
 - **Model switcher** — toggle between `deepseek-v4-flash` (fast) and `deepseek-v4-pro` (thinking mode)
 - **Secure API key** — stored in VS Code's `SecretStorage`, never in `settings.json`
+- **Workspace symbols** — `find_workspace_symbols` tool (language-server index, faster than grep for known names)
+- **File outline** — `get_document_outline` tool (classes, functions, hierarchy per file)
+- **`@selection`** — attach the current editor selection to a message (with `@path/to/file`)
+- **Export chat** — clipboard Markdown of the full thread (toolbar, view title, or command `DeepSeek: Export Chat to Clipboard`)
+- **Configurable rules** — `deepseek.rulesFiles` (default starts with `DEEPSEEK.md`, then `AGENTS.md`, etc.); first existing file is injected into the system prompt
 
 ## Install
 
@@ -21,7 +26,7 @@ npm run compile
 npx vsce package --allow-missing-repository
 ```
 
-In VS Code: **Extensions** → `...` → **Install from VSIX...** → select `deepseek-coder-0.4.0.vsix`.
+In VS Code: **Extensions** → `...` → **Install from VSIX...** → select `deepseek-coder-0.6.0.vsix`.
 
 ## Setting your API key
 
@@ -48,6 +53,7 @@ All commands are available from the Command Palette (`Ctrl+Shift+P`).
 | `DeepSeek: Refactor Code` | Refactor the selection given an instruction |
 | `DeepSeek: Generate Code` | Generate code from a description |
 | `DeepSeek: Clear Chat` | Reset the conversation |
+| `DeepSeek: Export Chat to Clipboard` | Copy the full chat as Markdown |
 
 ### Right-click menu (when text is selected)
 
@@ -74,7 +80,9 @@ Configure under **File → Preferences → Settings → Extensions → DeepSeek 
   // Max tokens for chat responses (256-8192)
   "deepseek.maxTokens": 2048,
   // Sampling temperature (0-1, lower = more deterministic)
-  "deepseek.temperature": 0.2
+  "deepseek.temperature": 0.2,
+  // Project rule files (first existing file wins)
+  "deepseek.rulesFiles": ["DEEPSEEK.md", "AGENTS.md", ".deepseekrules.md", ".deepseekrules", ".cursorrules"]
 }
 ```
 
@@ -90,8 +98,23 @@ When you chat, DeepSeek can autonomously call these tools:
 | `get_open_files` | See which tabs you have open |
 | `write_file` | Create/overwrite a file *(asks for confirmation + diff)* |
 | `apply_edit` | Replace exact text in a file *(asks for confirmation + diff)* |
+| `get_diagnostics` | Problems panel (errors / warnings from language servers) |
+| `get_git_status` | `git status`, diff stat, recent commits |
+| `run_command` | Run a shell command *(modal confirmation)* |
+| `find_workspace_symbols` | Workspace-wide symbol search (LSP index) |
+| `get_document_outline` | Hierarchical outline for one file (LSP) |
 
 The agent loop runs up to **8 iterations** per message. Each tool call appears as a card in the chat with a live status indicator.
+
+## Project rules (`deepseek.rulesFiles`)
+
+The first file that exists in the workspace root (from your configured list) is appended to the system prompt. Default order: `DEEPSEEK.md`, `AGENTS.md`, `.deepseekrules.md`, `.deepseekrules`, `.cursorrules`.
+
+Override in `settings.json`:
+
+```jsonc
+"deepseek.rulesFiles": ["docs/AI_RULES.md", "DEEPSEEK.md"]
+```
 
 ## Models
 

@@ -195,6 +195,43 @@ export const TOOL_DEFINITIONS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'find_workspace_symbols',
+      description:
+        'Search workspace-wide symbols (classes, functions, methods, etc.) using the language server index. ' +
+        'Much faster than grep when you know a symbol name. Returns file paths and line numbers.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'Substring to match symbol names (e.g. "LoginHandler", "parse").',
+          },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_document_outline',
+      description:
+        'Return the hierarchical outline (symbols) of a single file — classes, functions, fields — from the language server.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: {
+            type: 'string',
+            description: 'Workspace-relative path to the file.',
+          },
+        },
+        required: ['path'],
+      },
+    },
+  },
 ] as const;
 
 /** Available chat modes. Each mode exposes a different subset of tools. */
@@ -202,7 +239,15 @@ export type ChatMode = 'ask' | 'plan' | 'debug' | 'agent';
 
 const MODE_TOOLS: Record<ChatMode, readonly string[]> = {
   ask: [],
-  plan: ['read_file', 'list_directory', 'search_workspace', 'get_open_files', 'get_git_status'],
+  plan: [
+    'read_file',
+    'list_directory',
+    'search_workspace',
+    'get_open_files',
+    'get_git_status',
+    'find_workspace_symbols',
+    'get_document_outline',
+  ],
   debug: [
     'read_file',
     'list_directory',
@@ -210,6 +255,8 @@ const MODE_TOOLS: Record<ChatMode, readonly string[]> = {
     'get_open_files',
     'get_diagnostics',
     'get_git_status',
+    'find_workspace_symbols',
+    'get_document_outline',
   ],
   agent: [
     'read_file',
@@ -221,6 +268,8 @@ const MODE_TOOLS: Record<ChatMode, readonly string[]> = {
     'get_diagnostics',
     'get_git_status',
     'run_command',
+    'find_workspace_symbols',
+    'get_document_outline',
   ],
 };
 
@@ -294,6 +343,10 @@ export async function executeTool(
           String(args.command ?? ''),
           args.working_directory ? String(args.working_directory) : undefined
         );
+      case 'find_workspace_symbols':
+        return await findWorkspaceSymbols(String(args.query ?? ''));
+      case 'get_document_outline':
+        return await getDocumentOutline(String(args.path ?? ''));
       default:
         return `Error: unknown tool "${name}"`;
     }
@@ -455,6 +508,62 @@ async function runCommand(command: string, relCwd?: string): Promise<string> {
       }
     );
   });
+}
+
+async function findWorkspaceSymbols(query: string): Promise<string> {
+  if (!query.trim()) return 'Error: query is required';
+  try {
+    const syms = (await vscode.commands.executeCommand(
+      'vscode.executeWorkspaceSymbolProvider',
+      query.trim()
+    )) as vscode.SymbolInformation[] | undefined;
+    if (!syms?.length) return `No workspace symbols matching "${query}".`;
+    const lines = syms.slice(0, 80).map((s) => {
+      const rel = vscode.workspace.asRelativePath(s.location.uri);
+      const line = s.location.range.start.line + 1;
+      return `[${vscode.SymbolKind[s.kind]}] ${s.name} — ${rel}:${line}`;
+    });
+    return (
+      `${syms.length} symbol(s)${syms.length > 80 ? ' (showing first 80)' : ''}:\n` +
+      lines.join('\n')
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `Error: workspace symbols unavailable — ${msg}`;
+  }
+}
+
+function flattenDocSymbols(syms: vscode.DocumentSymbol[], depth: number): string[] {
+  const out: string[] = [];
+  const ind = '  '.repeat(depth);
+  for (const s of syms) {
+    const line = s.range.start.line + 1;
+    out.push(`${ind}[${vscode.SymbolKind[s.kind]}] ${s.name} (line ${line})`);
+    if (s.children?.length) out.push(...flattenDocSymbols(s.children, depth + 1));
+  }
+  return out;
+}
+
+async function getDocumentOutline(rel: string): Promise<string> {
+  if (!rel) return 'Error: path is required';
+  try {
+    const uri = resolveWorkspacePath(rel);
+    const raw = (await vscode.commands.executeCommand(
+      'vscode.executeDocumentSymbolProvider',
+      uri
+    )) as vscode.DocumentSymbol[] | undefined;
+    if (!raw?.length) {
+      return `No outline for "${rel}" (empty file or language server not active).`;
+    }
+    const lines = flattenDocSymbols(raw, 0);
+    const shown = lines.slice(0, 250);
+    return lines.length > 250
+      ? `${shown.join('\n')}\n... (${lines.length} symbols, truncated)`
+      : shown.join('\n');
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `Error: ${msg}`;
+  }
 }
 
 function getDiagnostics(rel: string | undefined, severityName: string): string {
